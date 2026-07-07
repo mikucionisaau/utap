@@ -1,28 +1,28 @@
 // -*- mode: C++; c-file-style: "stroustrup"; c-basic-offset: 4; -*-
 
  /* libutap - Uppaal Timed Automata Parser.
-	Copyright (C) 2011-2022 Aalborg University.
-	Copyright (C) 2002-2011 Uppsala University and Aalborg University.
+    Copyright (C) 2011-2024 Aalborg University.
+    Copyright (C) 2002-2011 Uppsala University and Aalborg University.
 
-	This library is free software; you can redistribute it and/or
-	modify it under the terms of the GNU Lesser General Public License
-	as published by the Free Software Foundation; either version 2.1 of
-	the License, or (at your option) any later version.
+    This library is free software; you can redistribute it and/or
+    modify it under the terms of the GNU Lesser General Public License
+    as published by the Free Software Foundation; either version 2.1 of
+    the License, or (at your option) any later version.
 
-	This library is distributed in the hope that it will be useful, but
-	WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-	Lesser General Public License for more details.
+    This library is distributed in the hope that it will be useful, but
+    WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+    Lesser General Public License for more details.
 
-	You should have received a copy of the GNU Lesser General Public
-	License along with this library; if not, write to the Free Software
-	Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307
-	USA
+    You should have received a copy of the GNU Lesser General Public
+    License along with this library; if not, write to the Free Software
+    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307
+    USA
  */
 
  /*********************************************************************
   * This bison grammar file contains both grammars for old and new XTA
-  * formats plus entry points for various productions used in the XML
+  * formats plus Entry points for various productions used in the XML
   * parser.
   *
   * There are numerous problems with parser error recognition and
@@ -38,11 +38,15 @@
   * made. Please report it, this might be corrected.
   */
 
+%code top {
+//NOLINTBEGIN
+}
+
 %code requires {
 
 #include "parser.hpp"
-#include "libparser.h"
-#include "utap/position.h"
+#include "libparser.hpp"
+#include "utap/position.hpp"
 
 #include <limits>
 #include <cstring> // strlen
@@ -50,26 +54,22 @@
 using namespace UTAP;
 using namespace Constants;
 
-#define YYLLOC_DEFAULT(Current, Rhs, N)        		  	        \
-	 do        								\
-	   if (N)        							\
-		 {								\
-		   (Current).start        = YYRHSLOC (Rhs, 1).start;	        \
-		   (Current).end          = YYRHSLOC (Rhs, N).end;	        \
-		 }								\
-	   else        							\
-		 {								\
-		   (Current).start        = (Current).end   =		        \
-			 YYRHSLOC (Rhs, 0).end;			  	        \
-		 }								\
-	 while (0)
+#define YYLLOC_DEFAULT(Current, Rhs, N)    \
+    do                                     \
+        if (N) {                           \
+            (Current).start = YYRHSLOC (Rhs, 1).start; \
+            (Current).end   = YYRHSLOC (Rhs, N).end;   \
+        } else {                           \
+            (Current).start = (Current).end = YYRHSLOC (Rhs, 0).end; \
+        }                                  \
+    while (0)
 
 #define YYLTYPE position_t
 }
 
 %code {
 static ParserBuilder *ch;
-static syntax_t syntax;
+static Syntax syntax;
 static int syntax_token = 0;
 
 static void utap_error(const char* msg);
@@ -78,13 +78,13 @@ static int lexer_flex();
 
 static int utap_lex()
 {
-   int old;
-   if (syntax_token) {
-	 old = syntax_token;
-	 syntax_token = 0;
-	 return old;
-   }
-   return lexer_flex();
+    int old;
+    if (syntax_token != 0) {
+       old = syntax_token;
+       syntax_token = 0;
+       return old;
+    }
+    return lexer_flex();
 }
 
 static char rootTransId[MAXLEN];
@@ -92,77 +92,56 @@ static char rootTransId[MAXLEN];
 /* Counter used during array parsing. */
 static int types = 0;
 
-#define CALL(first,last,call) do { ch->set_position(first.start, last.end); try { ch->call; } catch (TypeException &te) { ch->handle_error(te); } } while (0)
-
-#define YY_(msg) utap_msg(msg)
-
 struct str_entry_t
 {
-	int len;
-	const char* from;
-	const char* to;
+    size_t len;
+    const char* from;
+    const char* to;
 };
 
 const char* utap_msg(const char *msg)
 {
-	/* Simple & short log(n) algorithm.
-	 */
-#define NB_STR 8
-	static const str_entry_t table[NB_STR] =
-		{
-			{ .len=12,
-			  .from="syntax error",
-			  .to="$syntax_error" },
-			{ .len=16,
-			  .from="memory exhausted",
-			  .to="$memory_exhausted" },
-			{ .len=27,
-			  .from="syntax error, unexpected %s",
-			  .to="$syntax_error: $unexpected %s" },
-			{ .len=28,
-			  .from="syntax error: cannot back up",
-			  .to="$syntax_error: $cannot_back_up" },
-			{ .len=41,
-			  .from="syntax error, unexpected %s, expecting %s",
-			  .to="$syntax_error: $unexpected %s, $expecting %s" },
-			{ .len=47,
-			  .from="syntax error, unexpected %s, expecting %s or %s",
-			  .to="$syntax_error: $unexpected %s, $expecting %s $or %s" },
-			{ .len=53,
-			  .from="syntax error, unexpected %s, expecting %s or %s or %s",
-			  .to="$syntax_error: $unexpected %s, $expecting %s $or %s $or %s" },
-			{ .len=59,
-			  .from="syntax error, unexpected %s, expecting %s or %s or %s or %s",
-			  .to="$syntax_error: $unexpected %s, $expecting %s $or %s $or %s $or %s" }
-		};
-	int len = std::strlen(msg);
-	int i = NB_STR / 2;
-	while(i < NB_STR)
-	{
-		if (len < table[i].len)
-		{
-			if (i == 0) return msg;
-			i = i/2;
-			continue;
-		}
-		if (len > table[i].len)
-		{
-			if (i == NB_STR-1) return msg;
-			i = (i+NB_STR)/2;
-			continue;
-		}
-		for(;i < NB_STR && len <= table[i].len; ++i)
-		{
-			if (strcmp(msg, table[i].from) == 0)
-			{
-				return table[i].to;
-			}
-		}
-		break;
-	}
+    // Simple & short log(n) algorithm.
+    constexpr auto NB_STR = size_t{8};
+    static const str_entry_t table[NB_STR] = {
+        { 12, "syntax error", "$syntax_error" },
+        { 16, "memory exhausted", "$memory_exhausted" },
+        { 27, "syntax error, unexpected %s", "$syntax_error: $unexpected %s" },
+        { 28, "syntax error: cannot back up", "$syntax_error: $cannot_back_up" },
+        { 41, "syntax error, unexpected %s, expecting %s", "$syntax_error: $unexpected %s, $expecting %s" },
+        { 47, "syntax error, unexpected %s, expecting %s or %s",
+            "$syntax_error: $unexpected %s, $expecting %s $or %s" },
+        { 53, "syntax error, unexpected %s, expecting %s or %s or %s",
+            "$syntax_error: $unexpected %s, $expecting %s $or %s $or %s" },
+        { 59, "syntax error, unexpected %s, expecting %s or %s or %s or %s",
+            "$syntax_error: $unexpected %s, $expecting %s $or %s $or %s $or %s" }
+    };
+    const auto len = std::strlen(msg);
+    auto i = NB_STR / 2;
+    while (i < NB_STR) {
+        if (len < table[i].len) {
+            if (i == 0) return msg;
+            i = i/2;
+            continue;
+        }
+        if (len > table[i].len) {
+            if (i == NB_STR-1) return msg;
+            i = (i+NB_STR)/2;
+            continue;
+        }
+        for(;i < NB_STR && len <= table[i].len; ++i) {
+            if (strcmp(msg, table[i].from) == 0) {
+                return table[i].to;
+            }
+        }
+        break;
+    }
     return msg;
-#undef NB_STR
 }
+
+#define CALL(first,last,call) do { ch->set_position(first.start, last.end); try { ch->call; } catch (TypeException &te) { ch->handle_error(te); } } while (0)
+
+#define YY_(msg) utap_msg(msg)
 
 }
 
@@ -234,7 +213,7 @@ const char* utap_msg(const char *msg)
 /* Control Synthesis */
 %token T_CONTROL T_CONTROL_T T_SIMULATION
 
-/* Expectation optimization */
+/* ExpectationKind optimization */
 %token T_MINEXP T_MAXEXP T_MINPR T_MAXPR T_STRATEGY T_LOAD_STRAT T_SAVE_STRAT
 
 /* Strategy subjection */
@@ -317,14 +296,14 @@ const char* utap_msg(const char *msg)
 %left T_POWOP
 %right T_EXCLAM T_KW_NOT UOPERATOR
 %right T_INCREMENT T_DECREMENT
-%left '(' ')' '[' ']' '.' '\''
+%left '(' ')' '[' ']' '.' T_APOS
 
 
 %union {
     bool flag;
     int number;
-    ParserBuilder::PREFIX prefix;
-    kind_t kind;
+    ParserBuilder::TypePrefix prefix;
+    Kind kind;
     char string[MAXLEN];
     double floating;
 }
@@ -398,10 +377,10 @@ InstanceLineExpression:
 OptionalInstanceParameterList:
         /* empty */ { $$ = 0; }
         | '(' ')' {
-        	$$ = 0;
+            $$ = 0;
         }
         | '(' ParameterList ')' {
-        	$$ = $2;
+            $$ = $2;
         };
 
 System: SysDecl Progress GanttDecl;
@@ -464,8 +443,8 @@ GanttDef:
         /* empty */
         | GanttDef NonTypeId              { CALL(@2, @2, gantt_decl_begin($2)); }
           GanttArgs ':' GanttExprList ';' { CALL(@2, @6, gantt_decl_end());
-	}
-	;
+    }
+    ;
 
 GanttArgs:
         /* empty */
@@ -484,12 +463,12 @@ GanttDeclSelect:
 GanttExprList:
         GanttExpr
         | GanttExprList ',' GanttExpr
-	;
+    ;
 
 GanttExpr:
         Expression T_ARROW Expression {
-	    CALL(@1, @3, gantt_entry_begin());
-	    CALL(@1, @3, gantt_entry_end());
+        CALL(@1, @3, gantt_entry_begin());
+        CALL(@1, @3, gantt_entry_end());
         }
         | T_FOR                                                  { CALL(@1, @1, gantt_entry_begin()); }
           '(' GanttEntrySelect ')' Expression T_ARROW Expression { CALL(@1, @7, gantt_entry_end()); }
@@ -528,15 +507,15 @@ AfterUpdateDecl: T_AFTER '{' ExprList '}' { CALL(@3, @3, after_update()); };
 
 FunctionDecl:
         /* Notice that StatementList will catch all errors. Hence we
-         * should be able to guarantee, that once declFuncBegin() has
+         * should be able to guarantee, that once decl_func_begin() has
          * been called, we will also call decl_func_end().
-	 * Correction: No it won't.
-	 * int f() { if (cond) { return 0; }
-	 * will generate an error, not call decl_func_end, and the builder
-	 * will be left in an inconsistent state. EndBlock fixes that.
-     *
-     * Correction^2: It did not fix it. Discussion continued at
-     * StatementBuilder::declFuncBegin definition
+         * Correction: No it won't.
+         * int f() { if (cond) { return 0; }
+         * will generate an error, not call decl_func_end, and the builder
+         * will be left in an inconsistent state. EndBlock fixes that.
+         *
+         * Correction^2: It did not fix it. Discussion continued at
+         * StatementBuilder::declFuncBegin definition
          */
         Type Id OptionalParameterList '{' {
           CALL(@1, @2, func_type());
@@ -670,72 +649,56 @@ TypeId:
 
 Type:
         T_TYPENAME {
-            CALL(@1, @1, type_name(ParserBuilder::PREFIX_NONE, $1));
+            CALL(@1, @1, type_name(ParserBuilder::TypePrefix::NONE, $1));
         }
         | TypePrefix T_TYPENAME {
             CALL(@1, @2, type_name($1, $2));
         }
         | T_STRUCT '{' FieldDeclList '}' {
-            CALL(@1, @4, type_struct(ParserBuilder::PREFIX_NONE, $3));
+            CALL(@1, @4, type_struct(ParserBuilder::TypePrefix::NONE, $3));
         }
         | TypePrefix T_STRUCT '{' FieldDeclList '}' {
             CALL(@1, @5, type_struct($1, $4));
         }
         | T_STRUCT '{' error '}' {
-          CALL(@1, @4, type_struct(ParserBuilder::PREFIX_NONE, 0));
+          CALL(@1, @4, type_struct(ParserBuilder::TypePrefix::NONE, 0));
         }
         | TypePrefix T_STRUCT '{' error '}' {
-          CALL(@1, @5, type_struct(ParserBuilder::PREFIX_NONE, 0));
+          CALL(@1, @5, type_struct(ParserBuilder::TypePrefix::NONE, 0));
         }
         | T_BOOL {
-          CALL(@1, @1, type_bool(ParserBuilder::PREFIX_NONE));
+          CALL(@1, @1, type_bool(ParserBuilder::TypePrefix::NONE));
         }
         | TypePrefix T_BOOL {
           CALL(@1, @2, type_bool($1));
         }
-        | T_DOUBLE {
-	    CALL(@1, @1, type_double(ParserBuilder::PREFIX_NONE));
-        }
-        | TypePrefix T_DOUBLE {
-	    CALL(@1, @2, type_double($1));
-	}
-        | T_STRING {
-	    CALL(@1, @1, type_string(ParserBuilder::PREFIX_NONE));
-        }
-        | TypePrefix T_STRING {
-	    CALL(@1, @2, type_string($1));
-	}
-        | T_INT {
-          CALL(@1, @1, type_int(ParserBuilder::PREFIX_NONE));
-        }
-        | TypePrefix T_INT {
-          CALL(@1, @2, type_int($1));
-        }
+        | T_DOUBLE { CALL(@1, @1, type_double(ParserBuilder::TypePrefix::NONE)); }
+        | TypePrefix T_DOUBLE { CALL(@1, @2, type_double($1)); }
+        | T_STRING { CALL(@1, @1, type_string(ParserBuilder::TypePrefix::NONE)); }
+        | TypePrefix T_STRING { CALL(@1, @2, type_string($1)); }
+        | T_INT { CALL(@1, @1, type_int(ParserBuilder::TypePrefix::NONE)); }
+        | TypePrefix T_INT { CALL(@1, @2, type_int($1)); }
         | T_INT '[' Expression ',' Expression ']'
         {
-          CALL(@1, @6, type_bounded_int(ParserBuilder::PREFIX_NONE));
+          CALL(@1, @6, type_bounded_int(ParserBuilder::TypePrefix::NONE));
         }
         | TypePrefix T_INT  '[' Expression ',' Expression ']' {
           CALL(@1, @7, type_bounded_int($1));
         }
         | T_CHAN {
-          CALL(@1, @1, type_channel(ParserBuilder::PREFIX_NONE));
+          CALL(@1, @1, type_channel(ParserBuilder::TypePrefix::NONE));
         }
         | TypePrefix T_CHAN {
           CALL(@1, @2, type_channel($1));
         }
-        | T_CLOCK {
-	    CALL(@1, @1, type_clock(ParserBuilder::PREFIX_NONE));
-        }
-        | T_HYBRID T_CLOCK {
-	    CALL(@1, @1, type_clock(ParserBuilder::PREFIX_HYBRID));
-	}
+        | T_CLOCK { CALL(@1, @1, type_clock(ParserBuilder::TypePrefix::NONE)); }
+        | T_HYBRID T_CLOCK { CALL(@1, @1, type_clock(ParserBuilder::TypePrefix::HYBRID)); }
         | T_VOID {
           CALL(@1, @1, type_void());
         }
         | T_SCALAR '[' Expression ']'
         {
-          CALL(@1, @4, type_scalar(ParserBuilder::PREFIX_NONE));
+          CALL(@1, @4, type_scalar(ParserBuilder::TypePrefix::NONE));
         }
         | TypePrefix T_SCALAR  '[' Expression ']' {
           CALL(@1, @5, type_scalar($1));
@@ -787,11 +750,11 @@ FieldDeclId:
         ;
 
 TypePrefix:
-          T_URGENT    { $$ = ParserBuilder::PREFIX_URGENT; }
-        | T_BROADCAST { $$ = ParserBuilder::PREFIX_BROADCAST; }
-        | T_URGENT T_BROADCAST { $$ = ParserBuilder::PREFIX_URGENT_BROADCAST; }
-        | T_CONST  { $$ = ParserBuilder::PREFIX_CONST; }
-        | T_META { $$ = ParserBuilder::PREFIX_SYSTEM_META; }
+          T_URGENT    { $$ = ParserBuilder::TypePrefix::URGENT; }
+        | T_BROADCAST { $$ = ParserBuilder::TypePrefix::BROADCAST; }
+        | T_URGENT T_BROADCAST { $$ = ParserBuilder::TypePrefix::URGENT_BROADCAST; }
+        | T_CONST  { $$ = ParserBuilder::TypePrefix::CONST; }
+        | T_META { $$ = ParserBuilder::TypePrefix::SYSTEM_META; }
         ;
 
 /*********************************************************************
@@ -809,8 +772,8 @@ ProcDecl:
 
 ProcBody:
         ProcLocalDeclList States LocFlags Init Transitions
-	| ProcLocalDeclList States Branchpoints LocFlags Init Transitions
-	| /* empty */
+        | ProcLocalDeclList States Branchpoints LocFlags Init Transitions
+        | /* empty */
         ;
 
 ProcLocalDeclList:
@@ -833,17 +796,17 @@ StateDeclList:
 StateDecl:
           NonTypeId { CALL(@1, @1, proc_location($1, false, false)); }
         | NonTypeId '{' ';' ExpRate '}' {
-	    CALL(@1, @5, proc_location($1, false, true));
-	}
+        CALL(@1, @5, proc_location($1, false, true));
+    }
         | NonTypeId '{' Expression '}' {
-	    CALL(@1, @4, proc_location($1, true, false));
+        CALL(@1, @4, proc_location($1, true, false));
         }
         | NonTypeId '{' Expression ';' ExpRate '}' {
-	    CALL(@1, @6, proc_location($1, true, true));
-	}
+        CALL(@1, @6, proc_location($1, true, true));
+    }
         | NonTypeId '{' error '}' {
-	    CALL(@1, @4, proc_location($1, false, false));
-	}
+        CALL(@1, @4, proc_location($1, false, false));
+    }
         ;
 
 Branchpoints:
@@ -858,7 +821,7 @@ BranchpointDeclList:
 
 BranchpointDecl:
         NonTypeId {
-	    CALL(@1, @1, proc_branchpoint($1));
+        CALL(@1, @1, proc_branchpoint($1));
         };
 
 Init:
@@ -941,7 +904,7 @@ Sync:
 
 SyncExpr:
         Expression {
-	    CALL(@1, @1, proc_sync(SYNC_CSP));
+        CALL(@1, @1, proc_sync(SYNC_CSP));
         }
         | Expression T_EXCLAM {
           CALL(@1, @2, proc_sync(SYNC_BANG));
@@ -1018,9 +981,9 @@ UStateList:
 
 ExpRate:
         Expression
-	| Expression ':' Expression {
-	    CALL(@1,@3, expr_binary(FRACTION));
-	};
+    | Expression ':' Expression {
+        CALL(@1,@3, expr_binary(FRACTION));
+    };
 
 /**********************************************************************
  * Uppaal C grammar
@@ -1058,18 +1021,18 @@ IfCondition: T_IF '(' { CALL(@1, @2, if_begin()); } ExprList ')' { CALL(@3, @3, 
 IfConditionThenMatched: IfCondition MatchedStatement T_ELSE { CALL(@1, @3, if_then()); };
 
 MatchedStatement: IfConditionThenMatched MatchedStatement {
-	    CALL(@1, @2, if_end(true));
-	}
+        CALL(@1, @2, if_end(true));
+    }
         | OtherStatement
-	;
+    ;
 
 UnmatchedStatement: IfCondition Statement {
             CALL(@2, @2, if_then());
             CALL(@1, @2, if_end(false));
-	}
+    }
         | IfConditionThenMatched UnmatchedStatement {
-	    CALL(@1, @2, if_end(true));
-	}
+        CALL(@1, @2, if_end(true));
+    }
         ;
 
 OtherStatement:
@@ -1081,7 +1044,7 @@ OtherStatement:
           CALL(@1, @2, expr_statement());
         }
         | ForStatement
-	| WhileStatement
+    | WhileStatement
         | T_BREAK ';' {
             CALL(@1, @2, break_statement());
           }
@@ -1101,8 +1064,8 @@ OtherStatement:
           CALL(@1, @2, return_statement(false));
         }
         | T_ASSERT Expression ';' {
-	    CALL(@1, @2, assert_statement());
-	}
+        CALL(@1, @2, assert_statement());
+    }
         ;
 
 ForStatement: T_FOR '(' ExprList ';' ExprList ';' ExprList ')' {
@@ -1118,18 +1081,18 @@ ForStatement: T_FOR '(' ExprList ';' ExprList ';' ExprList ')' {
             CALL(@7, @7, iteration_end($3));
         }
         | T_FOR '(' error ')' Statement
-	;
+    ;
 
 WhileStatement: T_WHILE '(' {
             CALL(@1, @2, while_begin());
         }
         ExprList ')' Statement {
             CALL(@3, @4, while_end());
-	}
+    }
         | T_WHILE '(' error ')' Statement
         | T_DO {
             CALL(@1, @1, do_while_begin());
-	}
+    }
           Statement T_WHILE '(' ExprList ')' ';' {
             CALL(@2, @7, do_while_end());
         }
@@ -1141,11 +1104,11 @@ SwitchCaseList: SwitchCase
 
 SwitchCase:
         T_CASE Expression ':' {
-	    CALL(@1, @3, case_begin());
+        CALL(@1, @3, case_begin());
         }
         StatementList {
             CALL(@4, @4, case_end());
-	}
+    }
         | T_DEFAULT ':' {
             CALL(@1, @2, default_begin());
         }
@@ -1162,32 +1125,32 @@ ExprList:
 
 Expression:
         T_FALSE {
-	    CALL(@1, @1, expr_false());
+        CALL(@1, @1, expr_false());
         }
         | T_TRUE {
-	    CALL(@1, @1, expr_true());
+        CALL(@1, @1, expr_true());
         }
         | T_NAT  {
-	    CALL(@1, @1, expr_nat($1));
+        CALL(@1, @1, expr_nat($1));
         }
         | T_FLOATING {
-	    CALL(@1, @1, expr_double($1));
-	}
+        CALL(@1, @1, expr_double($1));
+    }
         | T_CHARARR
         {
             CALL(@1, @1, expr_string($1));
         }
         | BuiltinFunction1 '(' Expression ')' {
-	    CALL(@1, @4, expr_builtin_function1($1));
-	}
+        CALL(@1, @4, expr_builtin_function1($1));
+    }
         | BuiltinFunction2 '(' Expression ',' Expression ')' {
-	    CALL(@1, @6, expr_builtin_function2($1));
-	}
+        CALL(@1, @6, expr_builtin_function2($1));
+    }
         | BuiltinFunction3 '(' Expression ',' Expression ',' Expression ')' {
-	    CALL(@1, @8, expr_builtin_function3($1));
-	}
+        CALL(@1, @8, expr_builtin_function3($1));
+    }
         | NonTypeId {
-	    CALL(@1, @1, expr_identifier($1));
+        CALL(@1, @1, expr_identifier($1));
         }
         | Expression '(' {
             CALL(@1, @2, expr_call_begin());
@@ -1222,8 +1185,8 @@ Expression:
           CALL(@1, @2, expr_pre_decrement());
         }
         | T_MINUS T_POS_NEG_MAX {
-	  CALL(@1, @2, expr_nat(std::numeric_limits<int>::min()));
-	}
+      CALL(@1, @2, expr_nat(std::numeric_limits<int>::min()));
+    }
         | UnaryOp Expression {
           CALL(@1, @2, expr_unary($1));
         } %prec UOPERATOR
@@ -1293,7 +1256,7 @@ Expression:
         | Expression '.' NonTypeId {
           CALL(@1, @3, expr_dot($3));
         }
-        | Expression '\'' {
+        | Expression T_APOS {
             CALL(@1, @2, expr_unary(RATE));
         }
         | T_DEADLOCK {
@@ -1311,8 +1274,8 @@ Expression:
           CALL(@1, @3, expr_binary(OR));
         }
         | Expression T_KW_XOR Expression {
-	    CALL(@1, @3, expr_binary(XOR));
-	}
+        CALL(@1, @3, expr_binary(XOR));
+    }
         | Expression T_MIN Expression {
             CALL(@1, @3, expr_binary(MIN));
         }
@@ -1324,7 +1287,7 @@ Expression:
         } Expression {
             CALL(@1, @8, expr_sum_end($3));
         } %prec T_SUM
-	    | T_FORALL '(' Id ':' Type ')' {
+        | T_FORALL '(' Id ':' Type ')' {
             CALL(@1, @6, expr_forall_begin($3));
         } Expression {
             CALL(@1, @8, expr_forall_end($3));
@@ -1334,48 +1297,48 @@ Expression:
         } Expression {
             CALL(@1, @8, expr_exists_end($3));
         } %prec T_EXISTS
-	| DynamicExpression
-	| MITLExpression
+    | DynamicExpression
+    | MITLExpression
         | Assignment
         ;
 
 DynamicExpression:
         T_SPAWN NonTypeId {
-	    CALL(@1,@2, expr_identifier($2));
-	} '(' ArgList ')' {
-	    CALL(@1,@6, expr_spawn($5));
-	}
+        CALL(@1,@2, expr_identifier($2));
+    } '(' ArgList ')' {
+        CALL(@1,@6, expr_spawn($5));
+    }
         | T_EXIT '(' ')' {
-	    CALL(@1,@3, expr_exit());
-	}
+        CALL(@1,@3, expr_exit());
+    }
         | T_NUMOF '(' NonTypeId ')'{
-	    CALL(@3,@3, expr_identifier($3));
-	    CALL(@1,@4, expr_numof());
-	}
+        CALL(@3,@3, expr_identifier($3));
+        CALL(@1,@4, expr_numof());
+    }
         | T_FORALL '(' Id ':' NonTypeId {
-	    CALL(@1,@5, expr_identifier($5));
-	    CALL(@1,@5, expr_forall_dynamic_begin($3,$5));
-	} ')'  '(' Expression ')'   {
-	    CALL(@1,@8, expr_forall_dynamic_end($3));
-	}
+        CALL(@1,@5, expr_identifier($5));
+        CALL(@1,@5, expr_forall_dynamic_begin($3,$5));
+    } ')'  '(' Expression ')'   {
+        CALL(@1,@8, expr_forall_dynamic_end($3));
+    }
         | T_EXISTS '(' Id ':' NonTypeId {
-	    CALL(@1,@5, expr_identifier($5));
-	    CALL(@1,@5, expr_exists_dynamic_begin($3,$5));
-	} ')' '(' Expression ')'  {
-	    CALL(@1,@8, expr_exists_dynamic_end($3));
-	}
+        CALL(@1,@5, expr_identifier($5));
+        CALL(@1,@5, expr_exists_dynamic_begin($3,$5));
+    } ')' '(' Expression ')'  {
+        CALL(@1,@8, expr_exists_dynamic_end($3));
+    }
         | T_SUM '(' Id ':' NonTypeId {
-	    CALL(@1,@5, expr_identifier($5));
-	    CALL(@1,@5, expr_sum_dynamic_begin($3,$5));
-	} ')' Expression   {
-	    CALL(@1,@8, expr_sum_dynamic_end($3));
-	}
+        CALL(@1,@5, expr_identifier($5));
+        CALL(@1,@5, expr_sum_dynamic_begin($3,$5));
+    } ')' Expression   {
+        CALL(@1,@8, expr_sum_dynamic_end($3));
+    }
         | T_FOREACH '(' Id ':' NonTypeId {
-	    CALL(@1,@5, expr_identifier($5));
-	    CALL(@1,@5, expr_foreach_dynamic_begin($3,$5));
-	} ')' Expression   {
-	    CALL(@1,@8, expr_foreach_dynamic_end($3));
-	}
+        CALL(@1,@5, expr_identifier($5));
+        CALL(@1,@5, expr_foreach_dynamic_begin($3,$5));
+    } ')' Expression   {
+        CALL(@1,@8, expr_foreach_dynamic_end($3));
+    }
         ;
 
 
@@ -1505,7 +1468,7 @@ OldDeclaration:
 OldVarDecl:
         VariableDecl
         | T_OLDCONST {
-          CALL(@1, @1, type_int(ParserBuilder::PREFIX_CONST));
+          CALL(@1, @1, type_int(ParserBuilder::TypePrefix::CONST));
         } OldConstDeclIdList ';' {
           CALL(@1, @3, type_pop());
         }
@@ -1592,12 +1555,12 @@ OldProcParam:
 
 OldProcConstParam:
         T_OLDCONST {
-            CALL(@1, @1, type_int(ParserBuilder::PREFIX_CONST));
+            CALL(@1, @1, type_int(ParserBuilder::TypePrefix::CONST));
         } NonTypeId ArrayDecl {
             CALL(@3, @4, decl_parameter($3, false));
         }
         | OldProcConstParam ',' {
-            CALL(@1, @1, type_int(ParserBuilder::PREFIX_CONST));
+            CALL(@1, @1, type_int(ParserBuilder::TypePrefix::CONST));
         } NonTypeId ArrayDecl {
             CALL(@4, @5, decl_parameter($4, false));
         }
@@ -1624,10 +1587,10 @@ OldStateDeclList:
 
 OldStateDecl:
         NonTypeId {
-	    CALL(@1, @1, proc_location($1, false, false));
+        CALL(@1, @1, proc_location($1, false, false));
         }
         | NonTypeId '{' OldInvariant '}' {
-	    CALL(@1, @4, proc_location($1, true, false));
+        CALL(@1, @4, proc_location($1, true, false));
         }
         ;
 
@@ -1719,47 +1682,47 @@ PropertyList:
 PropertyList2:
         /* empty */
         | PropertyList2 Property '\n'
-	;
+    ;
 
 QueryList:
         /* empty */
-	| QueryList Query
-	;
+    | QueryList Query
+    ;
 
 Query:
         T_QUERY '{' Property '}'
         | T_QUERY '{' error '}'
-	;
+    ;
 
 BoolOrKWAnd:
         T_KW_AND | T_BOOL_AND;
 
 SubProperty:
         T_AF Expression {
-	    CALL(@1, @2, expr_unary(AF));
-	}
+        CALL(@1, @2, expr_unary(AF));
+    }
         | T_AG '(' Expression BoolOrKWAnd T_AF Expression ')' {
             CALL(@5, @6, expr_unary(AF));
             CALL(@3, @6, expr_binary(AND));
             CALL(@1, @7, expr_unary(AG));
         }
         | T_AG Expression {
-	    CALL(@1, @2, expr_unary(AG));
+        CALL(@1, @2, expr_unary(AG));
         }
-	| T_EF Expression {
-	    CALL(@1, @2, expr_unary(EF));
+    | T_EF Expression {
+        CALL(@1, @2, expr_unary(EF));
         }
-	| T_EG Expression {
-	    CALL(@1, @2, expr_unary(EG));
+    | T_EG Expression {
+        CALL(@1, @2, expr_unary(EG));
         }
-	| Expression T_LEADS_TO Expression {
-	    CALL(@1, @3, expr_binary(LEADS_TO));
+    | Expression T_LEADS_TO Expression {
+        CALL(@1, @3, expr_binary(LEADS_TO));
         }
-	| 'A' '[' Expression 'U' Expression ']' {
-	    CALL(@1, @6, expr_binary(A_UNTIL));
+    | 'A' '[' Expression 'U' Expression ']' {
+        CALL(@1, @6, expr_binary(A_UNTIL));
         }
-	| 'A' '[' Expression 'W' Expression ']' {
-	    CALL(@1, @6, expr_binary(A_WEAK_UNTIL));
+    | 'A' '[' Expression 'W' Expression ']' {
+        CALL(@1, @6, expr_binary(A_WEAK_UNTIL));
         }
 ;
 
@@ -1775,34 +1738,34 @@ AssignablePropperty:
         CALL(@1, @3, property());
     }
     | T_CONTROL_T T_MULT '(' Expression ',' Expression ')' ':' SubProperty {
-	CALL(@1, @9, expr_ternary(CONTROL_TOPT));
-	CALL(@1, @9, property());
+    CALL(@1, @9, expr_ternary(CONTROL_TOPT));
+    CALL(@1, @9, property());
     }
     | T_CONTROL_T T_MULT '(' Expression ')' ':' SubProperty {
-	CALL(@1, @7, expr_binary(CONTROL_TOPT_DEF1));
-	CALL(@1, @7, property());
+    CALL(@1, @7, expr_binary(CONTROL_TOPT_DEF1));
+    CALL(@1, @7, property());
     }
     | T_CONTROL_T T_MULT ':' SubProperty {
-	CALL(@1, @4, expr_unary(CONTROL_TOPT_DEF2));
-	CALL(@1, @4, property());
+    CALL(@1, @4, expr_unary(CONTROL_TOPT_DEF2));
+    CALL(@1, @4, property());
     }
     | T_EF T_CONTROL ':' SubProperty Subjection {
-	CALL(@1, @4, expr_unary(EF_CONTROL));
-	CALL(@1, @4, property());
+    CALL(@1, @4, expr_unary(EF_CONTROL));
+    CALL(@1, @4, property());
     }
     | BracketExprList T_CONTROL ':' SubProperty Subjection {
         CALL(@1, @4, expr_binary(PO_CONTROL));
-	CALL(@1, @4, property());
+    CALL(@1, @4, property());
     }
     | ExpQuantifier '(' Expression ')' '[' BoundType ']' Features ':' PathType Expression Subjection Imitation
     {
         CALL(@1, @12, expr_optimize_exp($1,  ParserBuilder::EXPRPRICE, $10));
-	CALL(@1, @9, property());
+    CALL(@1, @9, property());
     }
     | ExpPrQuantifier '[' BoundType ']' Features ':' PathType Expression Subjection Imitation
     {
         CALL(@1, @9, expr_optimize_exp($1, ParserBuilder::TIMEPRICE, $7));
-	CALL(@1, @6, property());
+    CALL(@1, @6, property());
     }
     | T_LOAD_STRAT Features '(' Expression ')' {
         CALL(@1, @5, expr_load_strategy());
@@ -1819,7 +1782,7 @@ PropertyExpr:
         CALL(@1, @1, property());
     }
     | T_PMAX Expression {  // Deprecated, comes from old uppaal-prob.
-	CALL(@1, @2, expr_unary(PMAX));
+    CALL(@1, @2, expr_unary(PMAX));
         CALL(@1, @2, property());
     }
     | AssignablePropperty
@@ -1830,47 +1793,47 @@ PropertyExpr:
         CALL(@1, @3, property());
     }
     | T_PROBA SMCBounds '(' PathType Expression ')' CmpGLE T_FLOATING Subjection {
-	CALL(@1, @9, expr_proba_qualitative($4, $7, $8));
+    CALL(@1, @9, expr_proba_qualitative($4, $7, $8));
         CALL(@1, @9, property());
     }
     | T_PROBA SMCBounds '(' PathType Expression ')' Subjection {
         CALL(@6, @6, expr_true()); // push a trivial stop-predicate (see next rule)
         CALL(@1, @7, expr_proba_quantitative($4));
-	CALL(@1, @7, property());
+    CALL(@1, @7, property());
     }
     | T_PROBA SMCBounds '(' Expression 'U' Expression ')' Subjection {
         CALL(@1, @8, expr_proba_quantitative(DIAMOND));
-	CALL(@1, @8, property());
+    CALL(@1, @8, property());
     }
     | T_PROBA SMCBounds '(' PathType Expression ')' T_GEQ
       T_PROBA SMCBounds '(' PathType Expression ')' Subjection {
-	CALL(@1, @14, expr_proba_compare($4, $11));
-	CALL(@1, @14, property());
+    CALL(@1, @14, expr_proba_compare($4, $11));
+    CALL(@1, @14, property());
     }
     | T_PROBA SMCBounds '(' PathType Expression ')' T_SUBJECT SubjectionList T_GEQ
       T_PROBA SMCBounds '(' PathType Expression ')' Subjection {
-	CALL(@1, @16, expr_proba_compare($4, $13));
-	CALL(@1, @16, property());
+    CALL(@1, @16, expr_proba_compare($4, $13));
+    CALL(@1, @16, property());
     }//T_SUBJECT SubjectionList
     | T_SIMULATE SMCBounds '{' NonEmptyExpressionList '}' Subjection {
         CALL(@1, @6, expr_simulate($4));
         CALL(@1, @6, property());
     }
     | T_SIMULATE SMCBounds '{' NonEmptyExpressionList '}' ':' Expression Subjection {
-	CALL(@1, @8, expr_simulate($4, true));
-	CALL(@1, @8, property());
+    CALL(@1, @8, expr_simulate($4, true));
+    CALL(@1, @8, property());
     }
     | T_SIMULATE SMCBounds '{' NonEmptyExpressionList '}' ':' T_NAT ':' Expression Subjection {
         CALL(@1, @10, expr_simulate($4, true, $7));
-	CALL(@1, @10, property());
+    CALL(@1, @10, property());
     }
     | 'E' SMCBounds '(' Id ':' Expression ')' Subjection {
         CALL(@1, @8, expr_proba_expected($4));
-	CALL(@1, @8, property());
+    CALL(@1, @8, property());
     }
     | T_PROBA Expression Subjection {
-	CALL(@1, @3, expr_MITL_formula());
-	CALL(@1, @3, property());
+    CALL(@1, @3, expr_MITL_formula());
+    CALL(@1, @3, property());
     }
     | T_SAVE_STRAT '(' Expression ',' Id ')' {
         CALL(@1, @6, subjection($5));
@@ -1881,7 +1844,7 @@ PropertyExpr:
 
 MITLExpression :
     '(' Expression 'U' '['  T_NAT ',' T_NAT ']' Expression ')' {
-	    CALL(@1,@10, expr_MITL_until($5,$7));
+        CALL(@1,@10, expr_MITL_until($5,$7));
     }
     | '(' Expression 'R' '['  T_NAT ',' T_NAT ']' Expression ')' {
         CALL(@1,@10, expr_MITL_release($5,$7));
@@ -1890,7 +1853,7 @@ MITLExpression :
         CALL(@1,@4, expr_MITL_next());
     }
     | '(' T_DIAMOND '[' T_NAT ',' T_NAT ']' Expression ')' {
-	    CALL(@1,@4, expr_MITL_diamond($4,$6));
+        CALL(@1,@4, expr_MITL_diamond($4,$6));
     }
     | '(' T_BOX '[' T_NAT ',' T_NAT ']' Expression ')' {
         CALL(@1,@4, expr_MITL_box($4,$6));
@@ -1899,10 +1862,10 @@ MITLExpression :
 
 SMCBounds:
     '[' BoundType ']' {
-	CALL(@1, @1, expr_nat(-1));
+    CALL(@1, @1, expr_nat(-1));
     }
     | '[' BoundType ';' T_NAT ']' {
-	CALL(@1, @3, expr_nat($4));
+    CALL(@1, @3, expr_nat($4));
     };
 
 BoundType:
@@ -1917,21 +1880,21 @@ CmpGLE:
         ;
 
 PathType:
-	    T_BOX { $$ = BOX; }
-	    | T_DIAMOND { $$ = DIAMOND; }
-	    ;
+        T_BOX { $$ = BOX; }
+        | T_DIAMOND { $$ = DIAMOND; }
+        ;
 
 BracketExprList:
-	'{' ExpressionList '}' {
-	    CALL(@1, @3, expr_nary(LIST,$2));
-	};
+    '{' ExpressionList '}' {
+        CALL(@1, @3, expr_nary(LIST,$2));
+    };
 
 /* There is an ExprList but it's not a list, rather
  * a binary tree built with commas.
  */
 
 ExpressionList:
-	/* nothing */ { $$ = 0; }
+    /* nothing */ { $$ = 0; }
         | NonEmptyExpressionList
         ;
 
@@ -1942,24 +1905,24 @@ NonEmptyExpressionList:
 
 SupPrefix:
         T_SUP ':' {
-	    CALL(@1, @2, expr_true());
-	}
-	| T_SUP '{' Expression '}' ':'
-	;
+        CALL(@1, @2, expr_true());
+    }
+    | T_SUP '{' Expression '}' ':'
+    ;
 
 InfPrefix:
-	T_INF ':' {
-	    CALL(@1, @2, expr_true());
-	}
-	| T_INF '{' Expression '}' ':'
-	;
+    T_INF ':' {
+        CALL(@1, @2, expr_true());
+    }
+    | T_INF '{' Expression '}' ':'
+    ;
 
 BoundsPrefix:
-	T_BOUNDS ':' {
-	    CALL(@1, @2, expr_true());
-	}
-	| T_BOUNDS '{' Expression '}' ':'
-	;
+    T_BOUNDS ':' {
+        CALL(@1, @2, expr_true());
+    }
+    | T_BOUNDS '{' Expression '}' ':'
+    ;
 
             
 StrategyAssignment: 
@@ -1968,28 +1931,30 @@ StrategyAssignment:
         };
 
 Property:
-	/* empty */
+    /* empty */
         | StrategyAssignment
         | PropertyExpr
-	| SupPrefix NonEmptyExpressionList Subjection {
-	    CALL(@1, @2, expr_nary(LIST,$2));
-	    CALL(@1, @2, expr_binary(SUP_VAR));
-	    CALL(@1, @2, property());
+    | SupPrefix NonEmptyExpressionList Subjection {
+        CALL(@1, @2, expr_nary(LIST,$2));
+        CALL(@1, @2, expr_binary(SUP_VAR));
+        CALL(@1, @2, property());
         }
-	| InfPrefix NonEmptyExpressionList Subjection {
-	    CALL(@1, @2, expr_nary(LIST,$2));
-	    CALL(@1, @2, expr_binary(INF_VAR));
-	    CALL(@1, @2, property());
-	}
-	| BoundsPrefix NonEmptyExpressionList Subjection {
-	    CALL(@1, @2, expr_nary(LIST,$2));
-	    CALL(@1, @2, expr_binary(BOUNDS_VAR));
-	    CALL(@1, @2, property());
-	};
+    | InfPrefix NonEmptyExpressionList Subjection {
+        CALL(@1, @2, expr_nary(LIST,$2));
+        CALL(@1, @2, expr_binary(INF_VAR));
+        CALL(@1, @2, property());
+    }
+    | BoundsPrefix NonEmptyExpressionList Subjection {
+        CALL(@1, @2, expr_nary(LIST,$2));
+        CALL(@1, @2, expr_binary(BOUNDS_VAR));
+        CALL(@1, @2, property());
+    };
 
 %%
 
 #include "lexer.cc"
+
+//NOLINTEND
 
 static void utap_error(const char* msg)
 {
@@ -1997,7 +1962,7 @@ static void utap_error(const char* msg)
     ch->handle_error(TypeException{msg});
 }
 
-static void setStartToken(xta_part_t part, bool newxta)
+static void setStartToken(XTAPart part, bool newxta)
 {
     switch (part)
     {
@@ -2023,8 +1988,8 @@ static void setStartToken(xta_part_t part, bool newxta)
         syntax_token = newxta ? T_NEW_INVARIANT : T_OLD_INVARIANT;
         break;
     case S_EXPONENTIAL_RATE:
-	syntax_token = T_EXPONENTIAL_RATE;
-	break;
+    syntax_token = T_EXPONENTIAL_RATE;
+    break;
     case S_SELECT:
         syntax_token = T_NEW_SELECT;
         break;
@@ -2068,15 +2033,15 @@ static void setStartToken(xta_part_t part, bool newxta)
     }
 }
 
-static int32_t parse_XTA(ParserBuilder *aParserBuilder,
-        		bool newxta, xta_part_t part, std::string xpath)
+static int32_t parse_XTA(ParserBuilder& aParserBuilder,
+                bool newxta, XTAPart part, std::string_view xpath)
 {
     // Select syntax
-    syntax = newxta ? syntax_t::NEW_GUIDING : syntax_t::OLD_GUIDING;
+    syntax = newxta ? Syntax::NEW_GUIDING : Syntax::OLD_GUIDING;
     setStartToken(part, newxta);
 
     // Set parser builder
-    ch = aParserBuilder;
+    ch = &aParserBuilder;
 
     // Reset position tracking
     tracker.setPath(ch, xpath);
@@ -2084,32 +2049,30 @@ static int32_t parse_XTA(ParserBuilder *aParserBuilder,
     // Parse string
     int res = 0;
 
-    if (utap_parse())
-    {
+    if (utap_parse() != 0)
         res = -1;
-    }
 
-    ch = NULL;
+    ch = nullptr;
     return res;
 }
 
-static int32_t parseProperty(ParserBuilder *aParserBuilder, const std::string& xpath)
+static int32_t parse_property(ParserBuilder& aParserBuilder, std::string_view xpath)
 {
     // Select syntax
-    syntax = syntax_t::PROPERTY;
+    syntax = Syntax::PROPERTY;
     setStartToken(S_PROPERTY, false);
 
     // Set parser builder
-    ch = aParserBuilder;
+    ch = &aParserBuilder;
 
     // Reset position tracking
     tracker.setPath(ch, xpath);
 
-    return utap_parse() ? -1 : 0;
+    return (utap_parse() != 0) ? -1 : 0;
 }
 
-int32_t parse_XTA(const char *str, ParserBuilder *builder,
-        	 bool newxta, xta_part_t part, std::string xpath)
+int32_t parse_XTA(const char *str, ParserBuilder& builder,
+             bool newxta, XTAPart part, std::string_view xpath)
 {
     utap__scan_string(str);
     int32_t res = parse_XTA(builder, newxta, part, xpath);
@@ -2118,7 +2081,7 @@ int32_t parse_XTA(const char *str, ParserBuilder *builder,
 }
 
 const char* utap_builtin_declarations() {
-return
+static const char* res =
 "const int INT8_MIN   =        -128;\n"
 "const int INT8_MAX   =         127;\n"
 "const int UINT8_MAX  =         255;\n"
@@ -2150,25 +2113,26 @@ return
 "const double M_SQRT2    = 1.4142135623730951454746218587388284504413604736328125;\n"  // sqrt(2)
 "const double M_SQRT1_2  = 0.70710678118654757273731092936941422522068023681640625;\n" // sqrt(1/2)
 ;
+    return res;
 }
 
 #include <iostream>
 
-int32_t parse_XTA(const char *str, ParserBuilder *builder, bool newxta)
+int32_t parse_XTA(const char *str, ParserBuilder& builder, bool newxta)
 {
     if (newxta){
         parse_XTA(utap_builtin_declarations(), builder, newxta, S_DECLARATION, "");
-        builder->builtin_decl_end();  
+        builder.builtin_decl_end();
     }
 
     return parse_XTA(str, builder, newxta, S_XTA, "");
 }
 
-int32_t parse_XTA(FILE *file, ParserBuilder *builder, bool newxta)
+int32_t parse_XTA(FILE *file, ParserBuilder& builder, bool newxta)
 {
     if (newxta){
         parse_XTA(utap_builtin_declarations(), builder, newxta, S_DECLARATION, "");
-        builder->builtin_decl_end();  
+        builder.builtin_decl_end();
     }
 
     utap__switch_to_buffer(utap__create_buffer(file, YY_BUF_SIZE));
@@ -2177,18 +2141,18 @@ int32_t parse_XTA(FILE *file, ParserBuilder *builder, bool newxta)
     return res;
 }
 
-int32_t parseProperty(const char *str, ParserBuilder *aParserBuilder, const std::string& xpath)
+int32_t parse_property(const char *str, ParserBuilder& aParserBuilder, const std::string& xpath)
 {
     utap__scan_string(str);
-    int32_t res = parseProperty(aParserBuilder, xpath);
+    int32_t res = parse_property(aParserBuilder, xpath);
     utap__delete_buffer(YY_CURRENT_BUFFER);
     return res;
 }
 
-int32_t parseProperty(FILE *file, ParserBuilder *aParserBuilder)
+int32_t parse_property(FILE *file, ParserBuilder& aParserBuilder)
 {
     utap__switch_to_buffer(utap__create_buffer(file, YY_BUF_SIZE));
-    int32_t res = parseProperty(aParserBuilder, "");
+    int32_t res = parse_property(aParserBuilder, "");
     utap__delete_buffer(YY_CURRENT_BUFFER);
     return res;
 }

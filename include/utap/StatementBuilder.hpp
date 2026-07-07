@@ -23,7 +23,7 @@
 #define UTAP_STATEMENTBUILDER_H
 
 #include "utap/ExpressionBuilder.hpp"
-#include "utap/utap.h"
+#include "utap/utap.hpp"
 
 #include <filesystem>
 #include <vector>
@@ -41,16 +41,16 @@ protected:
      * The \a params frame is used temporarily during parameter
      * parsing.
      */
-    frame_t params{frame_t::create()};
+    Frame params{Frame::make()};
 
     /** The function currently being parsed. */
-    function_t* currentFun{nullptr};
+    Function* currentFun{nullptr};
 
     /** Stack of nested statement blocks. */
     std::vector<std::unique_ptr<BlockStatement>> blocks;
 
     /** The types of a struct. */
-    std::vector<type_t> fields;
+    std::vector<Type> fields;
 
     /** The labels of a struct. */
     std::vector<std::string> labels;
@@ -61,46 +61,47 @@ protected:
     /** path to libraries*/
     std::vector<std::filesystem::path> libpaths;
 
-    virtual variable_t* addVariable(type_t type, const std::string& name, expression_t init, position_t pos) = 0;
-    virtual bool addFunction(type_t type, const std::string& name, position_t pos) = 0;
+    virtual Variable* add_variable(Type type, std::string_view name, Expression init, position_t pos) = 0;
+    virtual bool add_function(Type type, std::string_view name, position_t pos) = 0;
 
-    static void collectDependencies(std::set<symbol_t>&, expression_t);
-    static void collectDependencies(std::set<symbol_t>&, type_t);
+    static void collect_dependencies(std::set<Symbol>&, const Expression&);
+    static void collect_dependencies(std::set<Symbol>&, const Type&);
 
 public:
-    StatementBuilder(Document&, std::vector<std::filesystem::path> libpaths = {});
+    explicit StatementBuilder(Document&, std::vector<std::filesystem::path> libpaths = {});
     StatementBuilder(const StatementBuilder&) = delete;
 
     BlockStatement& get_block();
 
-    void type_array_of_size(size_t) override;
-    void type_array_of_type(size_t) override;
-    void type_struct(PREFIX, uint32_t fields) override;
-    void struct_field(const char* name) override;
-    void decl_typedef(const char* name) override;
-    void decl_var(const char* name, bool init) override;
+    void type_array_of_size(uint32_t) override;
+    void type_array_of_type(uint32_t) override;
+    void type_struct(TypePrefix, uint32_t fields) override;
+    void struct_field(std::string_view name) override;
+    void decl_typedef(std::string_view name) override;
+    void decl_var(std::string_view name, bool init) override;
+    Expression make_initialiser(const Type& type, const Expression& init);
     void decl_init_list(uint32_t num) override;
-    void decl_field_init(const char* name) override;
-    void decl_parameter(const char* name, bool) override;
+    void decl_field_init(std::string_view name) override;
+    void decl_parameter(std::string_view name, bool) override;
     void func_type() override;
-    void decl_func_begin(const char* name) override;
+    void decl_func_begin(std::string_view name) override;
     void decl_func_end() override;
-    void dynamic_load_lib(const char* name) override;
-    void decl_external_func(const char* name, const char* alias) override;
+    void dynamic_load_lib(std::string_view name) override;
+    void decl_external_func(std::string_view name, std::string_view alias) override;
     void block_begin() override;
     void block_end() override;
     void empty_statement() override;
     void for_begin() override;
     void for_end() override;
-    void iteration_begin(const char* name) override;
-    void iteration_end(const char* name) override;
+    void iteration_begin(std::string_view name) override;
+    void iteration_end(std::string_view name) override;
     void while_begin() override;
     void while_end() override;
     void do_while_begin() override;
     void do_while_end() override;
-    void if_begin() override{};
-    void if_condition() override{};
-    void if_then() override{};
+    void if_begin() override {};
+    void if_condition() override {};
+    void if_then() override {};
     void if_end(bool) override;
     void expr_statement() override;
     void return_statement(bool) override;

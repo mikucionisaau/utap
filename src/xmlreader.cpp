@@ -21,9 +21,9 @@
  */
 
 #include "keywords.hpp"
-#include "libparser.h"
+#include "libparser.hpp"
 
-#include "utap/utap.h"
+#include "utap/utap.hpp"
 
 #include <libxml/parser.h>
 #include <libxml/xmlreader.h>
@@ -31,6 +31,9 @@
 #include <libxml/xpath.h>
 
 #include <algorithm>
+#include <cassert>
+#include <charconv>
+#include <cstring>  // strncmp
 #include <list>
 #include <map>
 #include <memory>
@@ -40,9 +43,6 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
-#include <cassert>
-#include <charconv>
-#include <cstring>  // strncmp
 
 namespace UTAP {
 enum class tag_t {
@@ -150,9 +150,9 @@ static bool is_blank(std::string_view str) { return std::all_of(str.cbegin(), st
 
 static inline bool is_blank(const xmlChar* str) { return is_blank((const char*)str); }
 
-static inline bool is_alpha(unsigned char c) { return std::isalpha(c) || c == '_'; }
+static inline bool is_alpha(char c) { return std::isalpha(c) != 0 || c == '_'; }
 
-static bool is_id_char(unsigned char c) { return std::isalnum(c) || c == '_' || c == '$' || c == '#'; }
+static bool is_id_char(char c) { return std::isalnum(c) != 0 || c == '_' || c == '$' || c == '#'; }
 
 struct id_expected_error : std::logic_error
 {
@@ -169,35 +169,36 @@ struct xpath_corrupt_error : std::logic_error
     xpath_corrupt_error(): std::logic_error{"XPath is corrupted"} {}
 };
 
+std::string_view trim(std::string_view text)
+{
+    static constexpr auto ws = "\t\n\v\f\r ";
+    auto res = text.substr(0, 0);
+    if (auto b = text.find_first_not_of(ws); b != std::string_view::npos) {
+        auto e = text.find_last_not_of(ws);
+        res = text.substr(b, e - b + 1);
+    }
+    return res;
+}
+
 /**
  * Extracts the alpha-numerical symbol used for variable/type
  * identifiers.  Identifier starts with alpha and further might
  * contain digits, white spaces are ignored.
- *
- * Throws a TypeException is identifier is invalid or a newly
- * allocated string to be destroyed with delete [].
+ * @param text a potential identifier as a character string.
+ * @return valid identifier trimmed
+ * @throws std::logic_error if identifier is invalid.
  */
-static std::string_view symbol(std::string_view sv)
-{  // TODO: LSC revisit: this is very similar to trimming whitespace
-    if (sv.empty())
+static std::string_view symbol(std::string_view text)
+{
+    text = trim(text);
+    if (text.empty())
         throw id_expected_error{};
-    auto first = std::begin(sv);
-    const auto end = std::end(sv);
-    while (first != end && std::isspace(*first))
-        ++first;
-    if (first == end)
+    if (!is_alpha(text[0]))
         throw id_expected_error{};
-    if (!is_alpha(*first))
-        throw id_expected_error{};
-    auto last = first;
-    while (last != end && is_id_char(*last))
-        ++last;
-    auto p = last;
-    while (p != end && std::isspace(*p))
-        ++p;
-    if (p != end)
-        throw invalid_id_error{};
-    return std::string_view(first, std::distance(first, last));
+    for (const auto& c : text)
+        if (!is_id_char(c))
+            throw invalid_id_error{};
+    return text;
 }
 
 /**
@@ -229,7 +230,7 @@ public:
 
 static inline size_t count(const std::vector<tag_t>& level, tag_t tag)
 {
-    return std::count(std::begin(level), std::end(level), tag);
+    return static_cast<size_t>(std::count(std::begin(level), std::end(level), tag));
 }
 
 /** Returns the XPath encoding of the current path. */
@@ -300,10 +301,10 @@ class XMLReader
 {
 private:
     using elementmap_t = std::map<std::string, std::string>;
-    using xmlTextReader_ptr = std::unique_ptr<xmlTextReader, decltype(xmlFreeTextReader)&>;
+    using xmlTextReader_ptr = std::unique_ptr<xmlTextReader, decltype(&xmlFreeTextReader)>;
     xmlTextReader_ptr reader; /**< The underlying xmlTextReader */
     elementmap_t names;       /**< Map from id to name */
-    ParserBuilder* parser;    /**< The parser builder to which to push the model. */
+    ParserBuilder& parser;    /**< The parser builder to which to push the model. */
     bool newxta;              /**< True if we should use new syntax. */
     Path path;
     bool nta;                /**< True if the enclosing tag is "nta" (false if it is "project") */
@@ -354,7 +355,7 @@ private:
     /** Returns the name of a location. */
     const std::string& get_name(const char* id) const;
     /** Invokes the bison generated parser to parse the given string. */
-    int parse(const xmlChar*, xta_part_t syntax);
+    int parse(const xmlChar*, XTAPart syntax);
     /** Parse optional declaration. */
     bool declaration();
     /** Parse optional label. */
@@ -426,7 +427,7 @@ private:
     bool result();
 
 public:
-    XMLReader(xmlTextReaderPtr reader, ParserBuilder* parser, bool newxta):
+    XMLReader(xmlTextReaderPtr reader, ParserBuilder& parser, bool newxta):
         reader(reader, xmlFreeTextReader), parser{parser}, newxta{newxta}
     {
         read();
@@ -547,14 +548,14 @@ void XMLReader::read()
 
 const std::string& XMLReader::get_name(const char* id) const
 {
-    if (id) {
+    if (id != nullptr) {
         if (auto l = names.find(id); l != names.end())
             return l->second;
     }
     throw XMLDocError("Missing reference");
 }
 
-int XMLReader::parse(const xmlChar* text, xta_part_t syntax)
+int XMLReader::parse(const xmlChar* text, XTAPart syntax)
 {
     return parse_XTA((const char*)text, parser, newxta, syntax, path.str());
 }
@@ -582,7 +583,7 @@ bool XMLReader::label(bool required, const std::string& s_kind)
         /* Read the text and push it to the parser. */
         if (getNodeType() == XML_READER_TYPE_TEXT) {
             const xmlChar* text = xmlTextReaderConstValue(reader.get());
-            static const auto map = std::map<std::string_view, xta_part_t>{
+            static const auto map = std::map<std::string_view, XTAPart>{
                 {"invariant", S_INVARIANT},  {"select", S_SELECT},     {"guard", S_GUARD},
                 {"synchronisation", S_SYNC}, {"assignment", S_ASSIGN}, {"probability", S_PROBABILITY},
                 {"message", S_MESSAGE},      {"update", S_UPDATE},     {"condition", S_CONDITION},
@@ -593,13 +594,13 @@ bool XMLReader::label(bool required, const std::string& s_kind)
         xmlFree(kind);
         return true;
     } else if (required) {
-        tracker.setPath(parser, path.str());
+        tracker.setPath(&parser, path.str());
         if (s_kind == "message")  // LSC
-            parser->handle_error(TypeException{"$Message_label_is_required"});
+            parser.handle_error(TypeException{"$Message_label_is_required"});
         else if (s_kind == "update")  // LSC
-            parser->handle_error(TypeException{"$Update_label_is_required"});
+            parser.handle_error(TypeException{"$Update_label_is_required"});
         else if (s_kind == "condition")  // LSC
-            parser->handle_error(TypeException{"$Condition_label_is_required"});
+            parser.handle_error(TypeException{"$Condition_label_is_required"});
     }
     return false;
 }
@@ -636,7 +637,7 @@ std::string XMLReader::name(bool instanceLine)
 {
     std::string text = readString(tag_t::NAME, instanceLine);
     if (instanceLine && text.empty())
-        parser->handle_error(TypeException{"$Instance_name_is_required"});
+        parser.handle_error(TypeException{"$Instance_name_is_required"});
     return text;
 }
 
@@ -644,20 +645,19 @@ std::string XMLReader::readText(bool instanceLine)
 {
     if (getNodeType() == XML_READER_TYPE_TEXT) {  // text content of a node
         xmlChar* text = xmlTextReaderValue(reader.get());
-        auto len = text ? std::strlen((const char*)text) : 0;
-        auto text_sv = std::string_view{(const char*)text, len};
-        tracker.setPath(parser, path.str());
-        tracker.increment(parser, text_sv.size());
+        auto text_sv = std::string_view{text != nullptr ? (const char*)text : ""};
+        tracker.setPath(&parser, path.str());
+        tracker.increment(&parser, static_cast<uint32_t>(text_sv.size()));
         try {
-            std::string_view id = (instanceLine) ? text_sv : symbol(text_sv);
-            if (!is_keyword(id, syntax_t::OLD_PROPERTY)) {
+            auto id = (instanceLine) ? text_sv : symbol(text_sv);
+            if (!is_keyword(id, Syntax::OLD_PROPERTY)) {
                 auto res = std::string{id};
                 xmlFree(text);
                 return res;
             }
-            parser->handle_error(TypeException{"$Keywords_are_not_allowed_here"});
+            parser.handle_error(TypeException{"$Keywords_are_not_allowed_here"});
         } catch (std::logic_error& str) {
-            parser->handle_error(TypeException{str.what()});
+            parser.handle_error(TypeException{str.what()});
         }
         xmlFree(text);
     }
@@ -668,11 +668,11 @@ int XMLReader::readNumber()
 {
     read();
     if (getNodeType() == XML_READER_TYPE_TEXT) {  // text content of a node
-        tracker.setPath(parser, path.str());
+        tracker.setPath(&parser, path.str());
         xmlChar* text = xmlTextReaderValue(reader.get());
         const char* pc = (const char*)text;
-        auto len = std::strlen(pc);
-        tracker.increment(parser, len);
+        const auto len = static_cast<uint32_t>(std::strlen(pc));
+        tracker.increment(&parser, len);
         try {
             int value;
             if (auto [p, ec] = std::from_chars(pc, pc + len, value); ec != std::errc{})
@@ -680,7 +680,7 @@ int XMLReader::readNumber()
             xmlFree(text);
             return value;
         } catch (const char* str) {
-            parser->handle_error(TypeException{str});
+            parser.handle_error(TypeException{str});
         }
         xmlFree(text);
     }
@@ -759,24 +759,24 @@ bool XMLReader::location()
                 l_name = "_" + l_id;
             /* Remember the mapping from id to name */
             if (auto [_, ins] = names.insert_or_assign(l_id, l_name); !ins)
-                parser->handle_warning(TypeException{non_unique_id + l_id});
+                parser.handle_warning(TypeException{non_unique_id + l_id});
 
             /* Any error messages generated by any of the
              * procStateXXX calls must be attributed to the state
              * element. To do this, we add a dummy position of
              * length 1.
              */
-            tracker.setPath(parser, l_path);
-            tracker.increment(parser, 1);
+            tracker.setPath(&parser, l_path);
+            tracker.increment(&parser, 1);
 
             /* Push location to parser builder. */
-            parser->proc_location(l_name.c_str(), l_invariant, l_exponentialRate);
+            parser.proc_location(l_name, l_invariant, l_exponentialRate);
             if (l_committed)
-                parser->proc_location_commit(l_name.c_str());
+                parser.proc_location_commit(l_name);
             if (l_urgent)
-                parser->proc_location_urgent(l_name.c_str());
+                parser.proc_location_urgent(l_name);
         } catch (TypeException& e) {
-            parser->handle_error(e);
+            parser.handle_error(e);
         }
         return true;
     }
@@ -788,7 +788,7 @@ bool XMLReader::instance()
 {
     if (begin(tag_t::INSTANCE, false)) {
         try {
-            std::string i_path = path.str(tag_t::INSTANCE);
+            auto i_path = path.str(tag_t::INSTANCE);
             /* Extract ID attribute. */
             auto i_id = getAttributeStr("id");
             read();
@@ -796,26 +796,26 @@ bool XMLReader::instance()
                 throw TypeException{"Instance tag must have a unique \"id\" attribute"};
 
             /* Get name of the instance. */
-            tracker.setPath(parser, i_path);
-            tracker.increment(parser, 1);
-            std::string i_name = name(true);
+            tracker.setPath(&parser, i_path);
+            tracker.increment(&parser, 1);
+            auto i_name = name(true);
 
             /* Remember the mapping from id to name */
             if (auto [_, ins] = names.insert_or_assign(i_id, i_name); !ins)
-                parser->handle_warning(TypeException{non_unique_id + i_id});
+                parser.handle_warning(TypeException{non_unique_id + i_id});
 
             /* Any error messages generated by the
              * proc_instance_line call must be attributed to the
              * instance line element. To do this, we add a dummy
              * position of length 1.
              */
-            tracker.setPath(parser, i_path);
-            tracker.increment(parser, 1);
+            tracker.setPath(&parser, i_path);
+            tracker.increment(&parser, 1);
             /* Push instance to parser builder. */
-            parser->proc_instance_line();
+            parser.proc_instance_line();
             parse((xmlChar*)i_name.c_str(), S_INSTANCE_LINE);
         } catch (TypeException& e) {
-            parser->handle_error(e);
+            parser.handle_error(e);
         }
         return true;
     }
@@ -851,18 +851,18 @@ bool XMLReader::prechart()
             read();
             bottomPrechart = lscLocation();
             if (strcasecmp(currentType.c_str(), "existential") == 0) {
-                tracker.setPath(parser, p_path);
-                tracker.increment(parser, 1);
-                parser->handle_error(TypeException{"$Existential_charts_must_not_have_prechart"});
+                tracker.setPath(&parser, p_path);
+                tracker.increment(&parser, 1);
+                parser.handle_error(TypeException{"$Existential_charts_must_not_have_prechart"});
             }
-            parser->prechart_set(true);
+            parser.prechart_set(true);
         } catch (TypeException& e) {
-            parser->handle_error(e);
+            parser.handle_error(e);
         }
         return true;
     } else {
         bottomPrechart = -1;
-        parser->prechart_set(false);
+        parser.prechart_set(false);
     }
     return false;
 }
@@ -878,14 +878,14 @@ bool XMLReader::message()
             std::string to = target();
             int location = lscLocation();
             bool pch = (location < bottomPrechart);
-            tracker.setPath(parser, m_path);
-            tracker.increment(parser, 1);
-            parser->proc_message(from.c_str(), to.c_str(), location, pch);
-            tracker.setPath(parser, m_path);
-            tracker.increment(parser, 1);
+            tracker.setPath(&parser, m_path);
+            tracker.increment(&parser, 1);
+            parser.proc_message(from.c_str(), to.c_str(), location, pch);
+            tracker.setPath(&parser, m_path);
+            tracker.increment(&parser, 1);
             label(true, "message");
         } catch (TypeException& e) {
-            parser->handle_error(e);
+            parser.handle_error(e);
         }
         return true;
     }
@@ -903,15 +903,15 @@ bool XMLReader::condition()
             int location = lscLocation();
             bool pch = (location < bottomPrechart);
 
-            tracker.setPath(parser, c_path);
-            tracker.increment(parser, 1);
+            tracker.setPath(&parser, c_path);
+            tracker.increment(&parser, 1);
             std::string temp = temperature();
             bool hot = (temp == "hot");
-            parser->proc_condition(instance_anchors, location, pch, hot);
+            parser.proc_condition(instance_anchors, location, pch, hot);
 
             label(true, "condition");
         } catch (TypeException& e) {
-            parser->handle_error(e);
+            parser.handle_error(e);
         }
         return true;
     }
@@ -930,12 +930,12 @@ bool XMLReader::update()
             int location = lscLocation();
             bool pch = (location < bottomPrechart);
 
-            tracker.setPath(parser, u_path);
-            tracker.increment(parser, 1);
-            parser->proc_LSC_update(instance_anchor.c_str(), location, pch);
+            tracker.setPath(&parser, u_path);
+            tracker.increment(&parser, 1);
+            parser.proc_LSC_update(instance_anchor.c_str(), location, pch);
             label(true, "update");
         } catch (TypeException& e) {
-            parser->handle_error(e);
+            parser.handle_error(e);
         }
         return true;
     }
@@ -955,19 +955,19 @@ bool XMLReader::branchpoint()
             std::string b_name = "_" + b_id;
             /* Remember the mapping from id to name */
             if (auto [_, ins] = names.insert_or_assign(b_id, b_name); !ins)
-                parser->handle_warning(TypeException{non_unique_id + b_id});
+                parser.handle_warning(TypeException{non_unique_id + b_id});
             // FIXME: probably not necessary
             /* Any error messages generated by any of the
              * procStateXXX calls must be attributed to the state
              * element. To do this, we add a dummy position of
              * length 1.
              */
-            tracker.setPath(parser, b_path);
-            tracker.increment(parser, 1);
+            tracker.setPath(&parser, b_path);
+            tracker.increment(&parser, 1);
             /* Push branchpoint to parser builder. */
-            parser->proc_branchpoint(b_name.c_str());
+            parser.proc_branchpoint(b_name.c_str());
         } catch (TypeException& e) {
-            parser->handle_error(e);
+            parser.handle_error(e);
         }
         read();  // ignore any content and read next tag
         return true;
@@ -981,21 +981,21 @@ bool XMLReader::init()
         /* Get reference attribute. */
         char* ref = getAttribute("ref");
         /* Find location name for the reference. */
-        if (ref) {
-            std::string name = get_name(ref);
+        if (ref != nullptr) {
+            const auto name = get_name(ref);
             try {
-                parser->proc_location_init(name.c_str());
+                parser.proc_location_init(name.c_str());
             } catch (TypeException& te) {
-                parser->handle_error(te);
+                parser.handle_error(te);
             }
         } else {
-            parser->handle_error(TypeException{"$Missing_initial_location"});
+            parser.handle_error(TypeException{"$Missing_initial_location"});
         }
         xmlFree(ref);
         read();
         return true;
     } else {
-        parser->handle_error(TypeException{"$Missing_initial_location"});
+        parser.handle_error(TypeException{"$Missing_initial_location"});
     }
     return false;
 }
@@ -1033,10 +1033,9 @@ std::string XMLReader::anchor()
 std::vector<std::string> XMLReader::anchors()
 {
     std::vector<std::string> res;
-    while (begin(tag_t::ANCHOR, false)) {
+    while (begin(tag_t::ANCHOR, false))
         res.push_back(reference("instanceid"));
-    }
-    if (res.size() == 0)
+    if (res.empty())
         throw TypeException{"Missing anchor element"};
     return res;
 }
@@ -1051,21 +1050,21 @@ bool XMLReader::transition()
             xmlFree(type);
 
             char* id = getAttribute("action");
-            auto actname = std::string{id ? id : "SKIP"};
+            auto actname = std::string{id != nullptr ? id : "SKIP"};
             xmlFree(id);
 
             read();
-            std::string from = source();
-            std::string to = target();
+            auto from = source();
+            auto to = target();
 
-            parser->proc_edge_begin(from.c_str(), to.c_str(), control, actname.c_str());
+            parser.proc_edge_begin(from.c_str(), to.c_str(), control, actname.c_str());
             while (label())
                 ;
             while (begin(tag_t::NAIL))
                 read();
-            parser->proc_edge_end(from.c_str(), to.c_str());
+            parser.proc_edge_end(from.c_str(), to.c_str());
         } catch (TypeException& e) {
-            parser->handle_error(e);
+            parser.handle_error(e);
         }
         return true;
     }
@@ -1096,9 +1095,9 @@ bool XMLReader::templ()
 
             /* Push template start to parser builder. This might
              * throw a TypeException. */
-            tracker.setPath(parser, t_path);
-            tracker.increment(parser, 1);
-            parser->proc_begin(t_name.c_str());
+            tracker.setPath(&parser, t_path);
+            tracker.increment(&parser, 1);
+            parser.proc_begin(t_name.c_str());
 
             /* Parse declarations, locations, branchpoints,
              * the init tag and the transitions of the template. */
@@ -1107,18 +1106,18 @@ bool XMLReader::templ()
                 ;
             while (branchpoint())
                 ;
-            tracker.setPath(parser, t_path);
-            tracker.increment(parser, 1);
+            tracker.setPath(&parser, t_path);
+            tracker.increment(&parser, 1);
             init();
             while (transition())
                 ;
 
             /* Push template end to parser builder. */
-            tracker.setPath(parser, t_path);
-            tracker.increment(parser, 1);
-            parser->proc_end();
+            tracker.setPath(&parser, t_path);
+            tracker.increment(&parser, 1);
+            parser.proc_end();
         } catch (TypeException& e) {
-            parser->handle_error(e);
+            parser.handle_error(e);
         }
 
         return true;
@@ -1134,15 +1133,15 @@ bool XMLReader::lscTempl()
         try {
             /* Get the name and the parameters of the template. */
             std::string t_name = name();
-            parser->lscTemplateNames.push_back(t_name);
+            parser.lscTemplateNames.push_back(t_name);
             parameter();
             currentType = type();
             currentMode = mode();
             /* Push template start to parser builder. This might
              * throw a TypeException. */
-            tracker.setPath(parser, t_path);
-            tracker.increment(parser, 1);
-            parser->proc_begin(t_name.c_str(), false, currentType, currentMode);
+            tracker.setPath(&parser, t_path);
+            tracker.increment(&parser, 1);
+            parser.proc_begin(t_name.c_str(), false, currentType, currentMode);
 
             /* Parse declarations, locations, instances, prechart
              * messages, conditions and updates */
@@ -1160,11 +1159,11 @@ bool XMLReader::lscTempl()
                 ;
 
             /* Push template end to parser builder. */
-            tracker.setPath(parser, t_path);
-            tracker.increment(parser, 1);
-            parser->proc_end();
+            tracker.setPath(&parser, t_path);
+            tracker.increment(&parser, 1);
+            parser.proc_end();
         } catch (TypeException& e) {
-            parser->handle_error(e);
+            parser.handle_error(e);
         }
         return true;
     }
@@ -1187,7 +1186,7 @@ bool XMLReader::instantiation()
 void XMLReader::system()
 {
     if (begin(tag_t::SYSTEM, false)) {
-        parser->system_decl_begin();
+        parser.system_decl_begin();
 
         const auto* text = (const xmlChar*)"";
         read();
@@ -1198,20 +1197,20 @@ void XMLReader::system()
         // bison doesn't manage to properly set the position of errors,
         // leading to nonsense error placements.
         if (nodeType == XML_READER_TYPE_END_ELEMENT || is_blank(text)) {
-            tracker.setPath(parser, path.str(tag_t::SYSTEM));
-            tracker.increment(parser, 1);
-            parser->handle_error(TypeException{"$syntax_error: $unexpected $end"});
+            tracker.setPath(&parser, path.str(tag_t::SYSTEM));
+            tracker.increment(&parser, 1);
+            parser.handle_error(TypeException{"$syntax_error: $unexpected $end"});
             close(tag_t::SYSTEM);
             return;
         }
         parse(text, S_SYSTEM);
-        parser->system_decl_end();
+        parser.system_decl_end();
         close(tag_t::SYSTEM);
     } else {
         std::string s = (nta) ? path.str(tag_t::NTA) : path.str(tag_t::PROJECT);
-        tracker.setPath(parser, s);
-        tracker.increment(parser, 1);
-        parser->handle_error(TypeException{"$Missing_system_tag"});
+        tracker.setPath(&parser, s);
+        tracker.increment(&parser, 1);
+        parser.handle_error(TypeException{"$Missing_system_tag"});
     }
 }
 
@@ -1231,13 +1230,13 @@ bool XMLReader::query()
     if (begin(tag_t::QUERY, false)) {
         if (!isEmpty()) {
             read();
-            parser->query_begin();
+            parser.query_begin();
             zero_or_one(tag_t::QUERY, [this] { return formula(); });
             zero_or_one(tag_t::QUERY, [this] { return comment(); });
             zero_or_more(tag_t::QUERY, [this] { return option(); });
             zero_or_one(tag_t::QUERY, [this] { return expectation(); });
             zero_or_more(tag_t::QUERY, [this] { return result(); });
-            parser->query_end();
+            parser.query_end();
             close(tag_t::QUERY);
         } else
             read();  // look ahead next tag
@@ -1250,8 +1249,9 @@ bool XMLReader::formula()
     if (begin(tag_t::FORMULA, false)) {
         if (!isEmpty()) {
             read();
-            std::string xpath = path.str(tag_t::FORMULA);
-            parser->query_formula((const char*)xmlTextReaderConstValue(reader.get()), xpath.c_str());
+            const auto* text = xmlTextReaderConstValue(reader.get());
+            if (text != nullptr)
+                parser.query_formula((const char*)text, path.str(tag_t::FORMULA));
             close(tag_t::FORMULA);
         } else
             read();
@@ -1264,7 +1264,9 @@ bool XMLReader::comment()
     if (begin(tag_t::COMMENT, false)) {
         if (!isEmpty()) {
             read();
-            parser->query_comment((const char*)xmlTextReaderConstValue(reader.get()));
+            const auto* text = xmlTextReaderConstValue(reader.get());
+            if (text != nullptr)
+                parser.query_comment((const char*)text);
             close(tag_t::COMMENT);
         } else
             read();
@@ -1276,9 +1278,9 @@ bool XMLReader::comment()
 bool XMLReader::option()
 {
     if (begin(tag_t::OPTION, false)) {
-        auto key = getAttribute("key");
-        auto value = getAttribute("value");
-        parser->query_options(key, value);
+        char* key = getAttribute("key");
+        char* value = getAttribute("value");
+        parser.query_options(key, value);
         xmlFree(key);
         xmlFree(value);
         close(tag_t::OPTION);
@@ -1291,23 +1293,23 @@ bool XMLReader::expectation()
 {
     if (begin(tag_t::EXPECT, false)) {
         if (!isEmpty()) {
-            parser->expectation_begin();
-            auto outcome = getAttribute("outcome");
-            auto type = getAttribute("type");
-            auto value = getAttribute("value");
-            parser->expectation_value(outcome, type, value);
+            parser.expectation_begin();
+            char* outcome = getAttribute("outcome");
+            char* type = getAttribute("type");
+            char* value = getAttribute("value");
+            parser.expectation_value(outcome, type, value);
             zero_or_more(tag_t::EXPECT, [this] {
                 if (begin(tag_t::RESOURCE, false)) {
                     auto type = getAttributeStr("type");
                     auto value = getAttributeStr("value");
                     auto unit = getAttributeStr("unit");
-                    parser->expect_resource(type.c_str(), value.c_str(), unit.c_str());
+                    parser.expect_resource(type.c_str(), value.c_str(), unit.c_str());
                     close(tag_t::RESOURCE);
                     return true;
                 }
                 return false;
             });
-            parser->expectation_end();
+            parser.expectation_end();
             close(tag_t::EXPECT);
         } else
             read();
@@ -1331,7 +1333,7 @@ void XMLReader::project()
     nta = begin(tag_t::NTA);  // "nta" or "project"?
     if (newxta) {
         parse((const xmlChar*)utap_builtin_declarations(), S_DECLARATION);
-        parser->builtin_decl_end();
+        parser.builtin_decl_end();
     }
     read();
     declaration();
@@ -1343,16 +1345,16 @@ void XMLReader::project()
     system();
     if ((nta && !end(tag_t::NTA)) || (!nta && !end(tag_t::PROJECT)))
         queries();
-    parser->done();
+    parser.done();
 }
 
 bool XMLReader::model_options()
 {
     while (begin(tag_t::OPTION)) {
         read();
-        auto key = getAttribute("key");
-        auto value = getAttribute("value");
-        parser->model_option(key, value);
+        char* key = getAttribute("key");
+        char* value = getAttribute("value");
+        parser.model_option(key, value);
         close(tag_t::OPTION);
     }
     return true;
@@ -1361,7 +1363,7 @@ bool XMLReader::model_options()
 
 using namespace UTAP;
 
-int32_t parse_XML_fd(int fd, ParserBuilder* pb, bool newxta)
+int32_t parse_XML_fd(int fd, ParserBuilder& pb, bool newxta)
 {
     xmlTextReaderPtr reader =
         xmlReaderForFd(fd, "", "", XML_PARSE_NOCDATA | XML_PARSE_NOBLANKS | XML_PARSE_HUGE | XML_PARSE_RECOVER);
@@ -1371,19 +1373,20 @@ int32_t parse_XML_fd(int fd, ParserBuilder* pb, bool newxta)
     return 0;
 }
 
-int32_t parse_XML_file(const char* filename, ParserBuilder* pb, bool newxta)
+int32_t parse_XML_file(const std::filesystem::path& path, ParserBuilder& pb, bool newxta)
 {
-    xmlTextReaderPtr reader =
-        xmlReaderForFile(filename, "", XML_PARSE_NOCDATA | XML_PARSE_NOBLANKS | XML_PARSE_HUGE | XML_PARSE_RECOVER);
+    auto filename = path.string();
+    xmlTextReaderPtr reader = xmlReaderForFile(
+        filename.c_str(), "", XML_PARSE_NOCDATA | XML_PARSE_NOBLANKS | XML_PARSE_HUGE | XML_PARSE_RECOVER);
     if (reader == nullptr)
         return -1;
     XMLReader(reader, pb, newxta).project();
     return 0;
 }
 
-int32_t parse_XML_buffer(const char* buffer, ParserBuilder* pb, bool newxta)
+int32_t parse_XML_buffer(const char* buffer, ParserBuilder& pb, bool newxta)
 {
-    size_t length = strlen(buffer);
+    const auto length = static_cast<int>(strlen(buffer));
     xmlTextReaderPtr reader =
         xmlReaderForMemory(buffer, length, "", "", XML_PARSE_NOCDATA | XML_PARSE_HUGE | XML_PARSE_RECOVER);
     if (reader == nullptr)
@@ -1414,7 +1417,7 @@ std::string getXMLElement(xmlDocPtr docPtr, const std::string& path)  // used in
             // The first point of the xml node
             xmlNodePtr node = nodeset->nodeTab[0];
             xmlChar* s = xmlNodeListGetString(docPtr, node->xmlChildrenNode, 1);
-            if (s)
+            if (s != nullptr)
                 res = (char*)s;
             xmlFree(s);
         }

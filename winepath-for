@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -e
+
+if [ $# -eq 0 ]; then
+  echo "Script $0 prints WINEPATH to include MINGW and GCC runtime environments,"
+  echo "so that libwinpthread-1.dll, libgcc_s_seh-1.dll etc are available everywhere."
+  echo "Takes the toolchain as an argument. For example:"
+  echo "  x86_64-w64-mingw32  - for 64bit Windows binaries"
+  echo "  i686-w64-mingw32    - for 32bit Windows binaries"
+  exit 1
+else
+  toolchain="$1"
+fi
+
+CXX="${toolchain}-g++"
+
+if [ -z "$(command -v $CXX)" ]; then
+    echo "Failed to find a cross-compiler $CXX"
+    case $toolchain in
+      x86_64-w64-mingw32)
+        echo "Please install mingw-w64-x86-64-dev"
+        ;;
+      i686-w64-mingw32)
+        echo "Please install mingw-w64-i686-dev"
+        ;;
+    esac
+    exit 1
+fi
+
+if [ -z "$(command -v winepath)" ]; then
+    echo "Failed to find a winepath"
+    echo "Please install wine with winepath"
+    exit 1
+fi
+
+GCC_S_FILE=$($CXX --print-file-name libgcc_s.a)
+GCC_S_FILE=$(realpath "$GCC_S_FILE")
+GCC_RUNTIME_PATH=$(dirname "$GCC_S_FILE")
+GCC_RUNTIME_WINEPATH=$(winepath --windows "$GCC_RUNTIME_PATH")
+
+WINPTHREAD_FILE=$($CXX --print-file-name libwinpthread-1.dll)
+WINPTHREAD_FILE=$(realpath "$WINPTHREAD_FILE")
+MINGW_RUNTIME_PATH=$(dirname "$WINPTHREAD_FILE")
+MINGW_RUNTIME_WINEPATH=$(winepath --windows "$MINGW_RUNTIME_PATH")
+
+echo "${GCC_RUNTIME_WINEPATH};${MINGW_RUNTIME_WINEPATH}"

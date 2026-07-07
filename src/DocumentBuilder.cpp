@@ -21,20 +21,16 @@
 
 #include "utap/DocumentBuilder.hpp"
 
+#include "print.hpp"
+
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 #include <cassert>
-#include <cstring>
 
 using namespace UTAP;
 using namespace Constants;
-
-using std::vector;
-using std::pair;
-using std::make_pair;
-using std::min;
-using std::max;
-using std::string;
+using namespace std::string_view_literals;
 
 DocumentBuilder::DocumentBuilder(Document& doc, std::vector<std::filesystem::path> paths):
     StatementBuilder{doc, std::move(paths)}
@@ -45,21 +41,20 @@ DocumentBuilder::DocumentBuilder(Document& doc, std::vector<std::filesystem::pat
 /************************************************************
  * Variable and function declarations
  */
-variable_t* DocumentBuilder::addVariable(type_t type, const std::string& name, expression_t init, position_t pos)
+Variable* DocumentBuilder::add_variable(Type type, std::string_view name, Expression init, position_t pos)
 {
-    if (currentFun) {
+    if (currentFun != nullptr) {
         return document.add_variable_to_function(currentFun, frames.top(), type, name, init, pos);
-    } else {
-        return document.add_variable(getCurrentDeclarationBlock(), frames.top(), type, name, init, pos);
     }
+    return document.add_variable(get_current_declaration_block(), frames.top(), type, name, init, pos);
 }
 
-bool DocumentBuilder::addFunction(type_t type, const std::string& name, position_t pos)
+bool DocumentBuilder::add_function(Type type, std::string_view name, position_t pos)
 {
-    return getCurrentDeclarationBlock()->add_function(type, name, pos, currentFun);
+    return get_current_declaration_block()->add_function(type, name, pos, currentFun);
 }
 
-declarations_t* DocumentBuilder::getCurrentDeclarationBlock() { return declarations.top(); }
+Declarations* DocumentBuilder::get_current_declaration_block() { return declarations.top(); }
 
 void DocumentBuilder::system_decl_begin()
 {
@@ -70,27 +65,22 @@ void DocumentBuilder::system_decl_begin()
 void DocumentBuilder::system_decl_end()
 {
     declarations.pop();
-    popFrame();
+    pop_frame();
 }
 
-void DocumentBuilder::addSelectSymbolToFrame(const std::string& id, frame_t& frame, position_t pos)
+void DocumentBuilder::add_select_symbol_to_frame(std::string_view id, Frame& frame, position_t pos)
 {
-    type_t type = typeFragments[0];
-    typeFragments.pop();
-
+    auto type = typeFragments.pop();
     if (!type.is(CONSTANT)) {
         type = type.create_prefix(CONSTANT);
     }
-
     if (!type.is_scalar() && !type.is_integer()) {
         handle_error(TypeException{"$Scalar_set_or_integer_expected"});
     } else if (!type.is(RANGE)) {
         handle_error(TypeException{"$Range_expected"});
     } else {
-        symbol_t uid;
-        if (resolve(id, uid)) {
-            handle_warning(ShadowsAVariableWarning(id));
-        }
+        if (auto uid = Symbol{}; resolve(id, uid))
+            handle_warning(shadows_a_variable_warning(id));
         frame.add_symbol(id, type, pos);
     }
 }
@@ -99,35 +89,31 @@ void DocumentBuilder::addSelectSymbolToFrame(const std::string& id, frame_t& fra
  * Gantt chart
  */
 
-void DocumentBuilder::gantt_decl_begin(const char* name)
+void DocumentBuilder::gantt_decl_begin(std::string_view name)
 {
-    currentGantt = std::make_unique<gantt_t>(name);
-    push_frame(frame_t::create(frames.top()));
+    currentGantt = std::make_unique<GanttEntry>(name);
+    push_frame(frames.top().make_sub());
 }
 
-void DocumentBuilder::gantt_decl_select(const char* id) { addSelectSymbolToFrame(id, frames.top(), position); }
+void DocumentBuilder::gantt_decl_select(std::string_view id) { add_select_symbol_to_frame(id, frames.top(), position); }
 
 void DocumentBuilder::gantt_decl_end()
 {
-    currentGantt->parameters = frames.top();
-    popFrame();
-    document.add_gantt(getCurrentDeclarationBlock(), std::move(*currentGantt));
+    currentGantt->parameters = pop_top(frames);
+    document.add_gantt(get_current_declaration_block(), std::move(*currentGantt));
     currentGantt.reset();
 }
 
-void DocumentBuilder::gantt_entry_begin() { push_frame(frame_t::create(frames.top())); }
+void DocumentBuilder::gantt_entry_begin() { push_frame(frames.top().make_sub()); }
 
-void DocumentBuilder::gantt_entry_select(const char* id) { addSelectSymbolToFrame(id, frames.top(), position); }
+void DocumentBuilder::gantt_entry_select(std::string_view id) { add_select_symbol_to_frame(id, frames.top(), position); }
 
 void DocumentBuilder::gantt_entry_end()
 {
-    ganttmap_t gm;
-    gm.parameters = frames.top();
-    gm.predicate = fragments[1];
-    gm.mapping = fragments[0];
-    fragments.pop(2);
-    popFrame();
-    currentGantt->mapping.push_back(gm);
+    auto frame = pop_top(frames);
+    auto mapping = fragments.pop();
+    auto predicate = fragments.pop();
+    currentGantt->mapping.emplace_back(std::move(frame), std::move(predicate), std::move(mapping));
 }
 
 /************************************************************
@@ -135,28 +121,25 @@ void DocumentBuilder::gantt_entry_end()
  */
 void DocumentBuilder::decl_progress(bool hasGuard)
 {
-    expression_t guard, measure;
-    measure = fragments[0];
-    fragments.pop();
-    if (hasGuard) {
-        guard = fragments[0];
-        fragments.pop();
-    }
-    document.add_progress_measure(getCurrentDeclarationBlock(), guard, measure);
+    auto measure = fragments.pop();
+    auto guard = Expression{};
+    if (hasGuard)
+        guard = fragments.pop();
+    document.add_progress_measure(get_current_declaration_block(), guard, measure);
 }
 
 /********************************************************************
  * Process declarations
  */
-void DocumentBuilder::proc_begin(const char* name, const bool isTA, const string& type, const string& mode)
+void DocumentBuilder::proc_begin(std::string_view name, const bool isTA, std::string_view type, std::string_view mode)
 {
     currentTemplate = document.find_dynamic_template(name);
-    if (currentTemplate) {
-        /* check if parameters match */
+    if (currentTemplate != nullptr) {
+        // check if parameters match
         if (currentTemplate->parameters.get_size() != params.get_size()) {
             handle_error(TypeException{"Inconsistent parameters"});
         } else {
-            for (size_t i = 0; i < params.get_size(); i++) {
+            for (uint32_t i = 0; i < params.get_size(); i++) {
                 if (params[i].get_name() != currentTemplate->parameters[i].get_name() ||
                     params[i].get_type().get_kind() != currentTemplate->parameters[i].get_type().get_kind())
                     handle_error(TypeException{"Inconsistent parameters"});
@@ -164,11 +147,10 @@ void DocumentBuilder::proc_begin(const char* name, const bool isTA, const string
         }
         currentTemplate->is_defined = true;
     } else {
-        if (frames.top().contains(name)) {
-            handle_error(DuplicateDefinitionError(name));
-        }
+        if (frames.top().contains(name))
+            handle_error(duplicate_definition_error(name));
         // search if the given name is a name of LSC
-        auto lsc_name_it = find(lscTemplateNames.begin(), lscTemplateNames.end(), string(name));
+        auto lsc_name_it = find(lscTemplateNames.begin(), lscTemplateNames.end(), std::string(name));
         if (isTA && (lsc_name_it == lscTemplateNames.end())) {  // TA
             currentTemplate = &document.add_template(name, params, position);
         } else {  // LSC
@@ -178,14 +160,14 @@ void DocumentBuilder::proc_begin(const char* name, const bool isTA, const string
 
     declarations.push(currentTemplate);
     push_frame(currentTemplate->frame);
-    params = frame_t::create();
+    params = Frame::make();
 }
 
 void DocumentBuilder::proc_end()  // 1 ProcBody
 {
     declarations.pop();
     currentTemplate = nullptr;
-    popFrame();
+    frames.pop();
 }
 
 /**
@@ -193,24 +175,20 @@ void DocumentBuilder::proc_end()  // 1 ProcBody
  * expected on and popped from the expression stack if \a hasInvariant
  * is true.
  */
-void DocumentBuilder::proc_location(const char* name, bool hasInvariant, bool hasER)  // 1 expr
+void DocumentBuilder::proc_location(std::string_view name, bool hasInvariant, bool hasER)  // 1 expr
 {
-    expression_t e, f;
-    if (hasER) {
-        f = fragments[0];
-        fragments.pop();
-    }
-    if (hasInvariant) {
-        e = fragments[0];
-        fragments.pop();
-    }
-    currentTemplate->add_location(name, e, f, position);
+    Expression e;
+    Expression f;
+    if (hasER)
+        f = fragments.pop();
+    if (hasInvariant)
+        e = fragments.pop();
+    currentTemplate->add_location(name, std::move(e), std::move(f), position);
 }
 
-void DocumentBuilder::proc_location_commit(const char* name)
+void DocumentBuilder::proc_location_commit(std::string_view name)
 {
-    symbol_t uid;
-    if (!resolve(name, uid) || !uid.get_type().is_location()) {
+    if (auto uid = Symbol{}; !resolve(name, uid) || !uid.get_type().is_location()) {
         handle_error(TypeException{"$Location_expected"});
     } else if (uid.get_type().is(URGENT)) {
         handle_error(TypeException{"$States_cannot_be_committed_and_urgent_at_the_same_time"});
@@ -219,11 +197,9 @@ void DocumentBuilder::proc_location_commit(const char* name)
     }
 }
 
-void DocumentBuilder::proc_location_urgent(const char* name)
+void DocumentBuilder::proc_location_urgent(std::string_view name)
 {
-    symbol_t uid;
-
-    if (!resolve(name, uid) || !uid.get_type().is_location()) {
+    if (auto uid = Symbol{}; !resolve(name, uid) || !uid.get_type().is_location()) {
         handle_error(TypeException{"$Location_expected"});
     } else if (uid.get_type().is(COMMITTED)) {
         handle_error(TypeException{"$States_cannot_be_committed_and_urgent_at_the_same_time"});
@@ -232,152 +208,131 @@ void DocumentBuilder::proc_location_urgent(const char* name)
     }
 }
 
-void DocumentBuilder::proc_branchpoint(const char* name) { currentTemplate->add_branchpoint(name, position); }
+void DocumentBuilder::proc_branchpoint(std::string_view name) { currentTemplate->add_branchpoint(name, position); }
 
-void DocumentBuilder::proc_location_init(const char* name)
+void DocumentBuilder::proc_location_init(std::string_view name)
 {
-    symbol_t uid;
-    if (!resolve(name, uid) || !uid.get_type().is_location()) {
+    if (auto uid = Symbol{}; !resolve(name, uid) || !uid.get_type().is_location()) {
         handle_error(TypeException{"$Location_expected"});
     } else {
         currentTemplate->init = uid;
     }
 }
 
-void DocumentBuilder::proc_edge_begin(const char* from, const char* to, const bool control, const char* actname)
+void DocumentBuilder::proc_edge_begin(std::string_view from, std::string_view to, const bool control,
+                                      std::string_view actname)
 {
-    symbol_t fid, tid;
-
-    if (!resolve(from, fid) || (!fid.get_type().is_location() && !fid.get_type().is_branchpoint())) {
+    if (auto fid = Symbol{};
+        !resolve(from, fid) || (!fid.get_type().is_location() && !fid.get_type().is_branchpoint())) {
         handle_error(TypeException{"$No_such_location_or_branchpoint_(source)"});
-        push_frame(frame_t::create(frames.top()));  // dummy frame for upcoming popFrame
-    } else if (!resolve(to, tid) || (!tid.get_type().is_location() && !tid.get_type().is_branchpoint())) {
+        push_frame(frames.top().make_sub());  // dummy frame for upcoming popFrame
+    } else if (auto tid = Symbol{};
+               !resolve(to, tid) || (!tid.get_type().is_location() && !tid.get_type().is_branchpoint())) {
         handle_error(TypeException{"$No_such_location_or_branchpoint_(destination)"});
-        push_frame(frame_t::create(frames.top()));  // dummy frame for upcoming popFrame
+        push_frame(frames.top().make_sub());  // dummy frame for upcoming popFrame
     } else {
         currentEdge = &currentTemplate->add_edge(fid, tid, control, actname);
         currentEdge->guard = make_constant(1);
         currentEdge->assign = make_constant(1);
         // default "probability" weight is 1.
         currentEdge->prob = make_constant(1);
-        push_frame(currentEdge->select = frame_t::create(frames.top()));
+        push_frame(currentEdge->select = frames.top().make_sub());
     }
 }
 
-void DocumentBuilder::proc_edge_end(const char* from, const char* to) { popFrame(); }
+void DocumentBuilder::proc_edge_end(std::string_view from, std::string_view to) { frames.pop(); }
 
-void DocumentBuilder::proc_select(const char* id) { addSelectSymbolToFrame(id, currentEdge->select, position); }
+void DocumentBuilder::proc_select(std::string_view id) { add_select_symbol_to_frame(id, currentEdge->select, position); }
 
 void DocumentBuilder::proc_guard()
 {
-    if (!currentEdge) {
+    if (currentEdge == nullptr) {
         handle_error(TypeException("Must be declared inside of an edge"));
         return;
     }
-
-    currentEdge->guard = fragments[0];
-    fragments.pop();
+    currentEdge->guard = fragments.pop();
 }
 
-void DocumentBuilder::proc_sync(synchronisation_t type)
+void DocumentBuilder::proc_sync(Synchronisation type)
 {
-    if (!currentEdge) {
+    if (currentEdge == nullptr) {
         handle_error(TypeException("Must be declared inside of an edge"));
         return;
     }
-
-    currentEdge->sync = expression_t::create_sync(fragments[0], type, position);
-    fragments.pop();
+    currentEdge->sync = Expression::create_sync(fragments.pop(), type, position);
 }
 
 void DocumentBuilder::proc_update()
 {
-    if (!currentEdge) {
+    if (currentEdge == nullptr) {
         handle_error(TypeException("Must be declared inside of an edge"));
         return;
     }
-
-    currentEdge->assign = fragments[0];
-    fragments.pop();
+    currentEdge->assign = fragments.pop();
 }
 
 void DocumentBuilder::proc_prob()
 {
-    if (!currentEdge) {
+    if (currentEdge == nullptr) {
         handle_error(TypeException("Must be declared inside of an edge"));
         return;
     }
-
-    currentEdge->prob = fragments[0];
-    fragments.pop();
+    currentEdge->prob = fragments.pop();
 }
 
 /********************************************************************
  * System declaration
  */
 
-void DocumentBuilder::instantiation_begin(const char* name, size_t parameters, const char* templ_name)
+void DocumentBuilder::instantiation_begin(std::string_view name, uint32_t parameters, std::string_view templ_name)
 {
-    /* Make sure this identifier is new.
-     */
-    if (frames.top().contains(name)) {
-        handle_error(DuplicateDefinitionError(name));
-    }
+    // Make sure this identifier is new.
+    if (frames.top().contains(name))
+        handle_error(duplicate_definition_error(name));
 
-    /* Lookup symbol.
-     */
-    symbol_t id;
+    // Lookup symbol.
+    auto id = Symbol{};
     if (!resolve(templ_name, id) ||
         (id.get_type().get_kind() != INSTANCE && id.get_type().get_kind() != LSC_INSTANCE)) {
         handle_error(TypeException{"$Not_a_template"});
     }
 
-    /* Push parameters to frame stack.
-     */
-    frame_t frame = frame_t::create(frames.top());
+    // Push parameters to frame stack.
+    auto frame = frames.top().make_sub();
     frame.add(params);
     push_frame(frame);
-    params = frame_t::create();
+    params = Frame::make();
 }
 
-void DocumentBuilder::instantiation_end(const char* name, size_t parameters, const char* templ_name, size_t arguments)
+void DocumentBuilder::instantiation_end(std::string_view name, uint32_t parameters, std::string_view templ_name,
+                                        uint32_t arguments)
 {
-    /* Parameters are at the top of the frame stack.
-     */
-    frame_t params = frames.top();
-    popFrame();
+    // Parameters are at the top of the frame stack.
+    auto params = pop_top(frames);
     assert(parameters == params.get_size());
 
     /* Lookup symbol. In case of failure, instantiationBegin already
      * reported the problem.
      */
-    symbol_t id;
+    auto id = Symbol{};
     if (resolve(templ_name, id) && (id.get_type().get_kind() == INSTANCE || id.get_type().get_kind() == LSC_INSTANCE)) {
-        instance_t* old_instance = static_cast<instance_t*>(id.get_data());
-
-        /* Check number of arguments. If too many arguments, pop the
-         * rest.
-         */
-        size_t expected = id.get_type().size();
+        auto* old_instance = static_cast<Instance*>(id.get_data());
+        // Check number of arguments. If too many arguments, pop the rest.
+        auto expected = id.get_type().size();
         if (arguments < expected) {
             handle_error(TypeException{"$Too_few_arguments"});
         } else if (arguments > expected) {
             handle_error(TypeException{"$Too_many_arguments"});
         } else {
-            /* Collect arguments from expression stack.
-             */
-            vector<expression_t> exprs(arguments);
-            while (arguments) {
-                arguments--;
-                exprs[arguments] = fragments[0];
-                fragments.pop();
-            }
-
-            /* Create template composition.
-             */
-            instance_t& new_instance = (id.get_type().get_kind() == INSTANCE)
-                                           ? document.add_instance(name, *old_instance, params, exprs, position)
-                                           : document.add_LSC_instance(name, *old_instance, params, exprs, position);
+            // Collect arguments from expression stack.
+            auto exprs = std::vector<Expression>(arguments);
+            while (arguments-- > 0)
+                exprs[arguments] = fragments.pop();
+            arguments = 0;
+            // Create template composition.
+            Instance& new_instance = (id.get_type().get_kind() == INSTANCE)
+                                         ? document.add_instance(name, *old_instance, params, exprs, position)
+                                         : document.add_LSC_instance(name, *old_instance, params, exprs, position);
 
             /* Propagate information about restricted variables. The
              * variables used in arguments to restricted parameters of
@@ -385,10 +340,10 @@ void DocumentBuilder::instantiation_end(const char* name, size_t parameters, con
              *
              * REVISIT: Move to document.cpp?
              */
-            std::set<symbol_t>& restricted = old_instance->restricted;
-            for (size_t i = 0; i < expected; i++) {
+            std::set<Symbol>& restricted = old_instance->restricted;
+            for (uint32_t i = 0; i < expected; i++) {
                 if (restricted.find(old_instance->parameters[i]) != restricted.end()) {
-                    collectDependencies(new_instance.restricted, exprs[i]);
+                    collect_dependencies(new_instance.restricted, exprs[i]);
                 }
             }
         }
@@ -398,20 +353,19 @@ void DocumentBuilder::instantiation_end(const char* name, size_t parameters, con
 
 // Adds process_t* pointer to system_line
 // Checks for duplicate entries
-void DocumentBuilder::process(const char* name)
+void DocumentBuilder::process(std::string_view name)
 {
-    symbol_t symbol;
-    if (!resolve(name, symbol)) {
-        throw NoSuchProcessError(name);
-    }
-    type_t type = symbol.get_type();
-    if (type.get_kind() != INSTANCE) {
-        throw NotATemplateError(symbol.get_name());
-    }
+    auto symbol = Symbol{};
+    if (!resolve(name, symbol))
+        throw no_such_process_error(name);
+
+    auto type = symbol.get_type();
+    if (type.get_kind() != INSTANCE)
+        throw not_a_template_error(symbol.get_name());
     if (type.size() > 0) {
         // FIXME: Check type of unbound parameters
     }
-    auto& instance = *static_cast<instance_t*>(symbol.get_data());
+    auto& instance = *static_cast<Instance*>(symbol.get_data());
     instance.templ->is_instantiated = true;
     document.add_process(instance, position);
     proc_priority(name);
@@ -421,43 +375,27 @@ void DocumentBuilder::process_list_end() {}
 
 void DocumentBuilder::done() {}
 
-void DocumentBuilder::before_update()
-{
-    document.set_before_update(fragments[0]);
-    fragments.pop();
-}
+void DocumentBuilder::before_update() { document.set_before_update(fragments.pop()); }
 
-void DocumentBuilder::after_update()
-{
-    document.set_after_update(fragments[0]);
-    fragments.pop();
-}
+void DocumentBuilder::after_update() { document.set_after_update(fragments.pop()); }
 
 /********************************************************************
  * Priority
  */
 
-void DocumentBuilder::chan_priority_begin()
-{
-    document.begin_chan_priority(fragments[0]);
-    fragments.pop();
-}
+void DocumentBuilder::chan_priority_begin() { document.begin_chan_priority(fragments.pop()); }
 
-void DocumentBuilder::chan_priority_add(char separator)
-{
-    document.add_chan_priority(separator, fragments[0]);
-    fragments.pop();
-}
+void DocumentBuilder::chan_priority_add(char separator) { document.add_chan_priority(separator, fragments.pop()); }
 
-void DocumentBuilder::chan_priority_default() { fragments.push(expression_t()); }
+void DocumentBuilder::chan_priority_default() { fragments.push(Expression()); }
 
 void DocumentBuilder::proc_priority_inc() { currentProcPriority++; }
 
-void DocumentBuilder::proc_priority(const string& name)
+void DocumentBuilder::proc_priority(std::string_view name)
 {
-    symbol_t symbol;
+    Symbol symbol;
     if (!resolve(name, symbol)) {
-        handle_error(NoSuchProcessError(name));
+        handle_error(no_such_process_error(name));
     } else {
         document.set_proc_priority(name, currentProcPriority);
     }
@@ -476,82 +414,64 @@ void DocumentBuilder::proc_instance_line() { currentInstanceLine = &currentTempl
  * In this case, we cannot check that "Train1" exists yet,
  * because the system declarations have not yet been parsed.
  */
-void DocumentBuilder::instance_name(const char* name, bool templ)
+void DocumentBuilder::instance_name(std::string_view name, bool templ)
 {
-    symbol_t uid;
+    Symbol uid;
     if (templ) {
-        string instName = string(name);
-        string templName = instName.substr(0, instName.find('('));  // std::cout << templName << std::endl;
-        if (!resolve(templName, uid) || (uid.get_type().get_kind() != INSTANCE)) {
-            handle_error(NotATemplateError(templName));
-        }
+        auto instName = std::string{name};
+        auto templName = instName.substr(0, instName.find('('));
+        if (!resolve(templName, uid) || (uid.get_type().get_kind() != INSTANCE))
+            handle_error(not_a_template_error(templName));
     } else {
-        if (resolve(string(name), uid) && (uid.get_type().get_kind() == INSTANCE)) {
-            template_t* t = static_cast<template_t*>(uid.get_data());
+        if (resolve(name, uid) && (uid.get_type().get_kind() == INSTANCE)) {
+            const auto* t = static_cast<Template*>(uid.get_data());
             if (t->parameters.get_size() > 0) {
                 handle_error(TypeException{"$Wrong_number_of_arguments_in_instance_line_name"});
             }
         }
     }
     currentInstanceLine->uid =
-        currentTemplate->frame.add_symbol(name, type_t::create_primitive(INSTANCE_LINE), position, currentInstanceLine);
+        currentTemplate->frame.add_symbol(name, Type::create_primitive(INSTANCE_LINE), position, currentInstanceLine);
 }
 
-void DocumentBuilder::instance_name_begin(const char* name)
+void DocumentBuilder::instance_name_begin(std::string_view name)
 {
-    /* Push parameters to frame stack.
-     */
-    frame_t frame = frame_t::create(frames.top());
+    // Push parameters to frame stack.
+    auto frame = frames.top().make_sub();
     frame.add(params);
     push_frame(frame);
-    params = frame_t::create();
+    params = Frame::make();
 }
 
-void DocumentBuilder::instance_name_end(const char* name, size_t arguments)
+void DocumentBuilder::instance_name_end(std::string_view name, uint32_t arguments)
 {
-    std::string i_name = std::string(name);
-    vector<expression_t>::const_iterator itr;
-    /* Parameters are at the top of the frame stack.
-     */
-    frame_t params = frames.top();
-    popFrame();
+    auto i_name = std::ostringstream{};
+    i_name << name;
+    // Parameters are at the top of the frame stack.
+    auto params = pop_top(frames);
     // assert(parameters == params.get_size());
 
-    /* Lookup symbol. In case of failure, instance_name_begin already
-     * reported the problem.
-     */
-    symbol_t id;
-    if (resolve(name, id) && id.get_type().get_kind() == INSTANCE) {
-        instance_t* old_instance = static_cast<instance_t*>(id.get_data());
+    // Lookup symbol. In case of failure, instance_name_begin already reported the problem.
+    if (auto id = Symbol{}; resolve(name, id) && id.get_type().get_kind() == INSTANCE) {
+        auto* old_instance = static_cast<Instance*>(id.get_data());
 
         /* Check number of arguments. If too many arguments, pop the
          * rest.
          */
-        size_t expected = id.get_type().size();
+        auto expected = id.get_type().size();
         if (arguments < expected) {
             handle_error(TypeException{"$Too_few_arguments"});
         } else if (arguments > expected) {
             handle_error(TypeException{"$Too_many_arguments"});
         } else {
-            /* Collect arguments from expression stack.
-             */
-            vector<expression_t> exprs(arguments);
-            while (arguments) {
-                arguments--;
-                exprs[arguments] = fragments[0];
-                fragments.pop();
-            }
-            i_name += '(';
-            for (itr = exprs.begin(); itr != exprs.end(); ++itr) {
-                if (itr != exprs.begin() && exprs.size() > 1) {
-                    i_name += ',';
-                }
-                i_name += itr->str();
-            }
-            i_name += ')';
-            instance_name(i_name.c_str());  // std::cout << "instance line name: " << i_name << std::endl;
-            /* Create template composition.
-             */
+            // Collect arguments from expression stack.
+            auto exprs = std::vector<Expression>(arguments);
+            while (arguments-- > 0)
+                exprs[arguments] = fragments.pop();
+            arguments = 0;
+            i_name << '(' << infix(exprs, ",") << ')';
+            instance_name(i_name.str().c_str());
+            // Create template composition.
             currentInstanceLine->add_parameters(*old_instance, params, exprs);
 
             /* Propagate information about restricted variables. The
@@ -560,10 +480,10 @@ void DocumentBuilder::instance_name_end(const char* name, size_t arguments)
              *
              * REVISIT: Move to document.cpp?
              */
-            std::set<symbol_t>& restricted = old_instance->restricted;
-            for (size_t i = 0; i < expected; i++) {
+            std::set<Symbol>& restricted = old_instance->restricted;
+            for (uint32_t i = 0; i < expected; i++) {
                 if (restricted.find(old_instance->parameters[i]) != restricted.end()) {
-                    collectDependencies(currentInstanceLine->restricted, exprs[i]);
+                    collect_dependencies(currentInstanceLine->restricted, exprs[i]);
                 }
             }
         }
@@ -574,9 +494,10 @@ void DocumentBuilder::instance_name_end(const char* name, size_t arguments)
 /**
  * Add a message to the current template.
  */
-void DocumentBuilder::proc_message(const char* from, const char* to, const int loc, const bool pch)
+void DocumentBuilder::proc_message(std::string_view from, std::string_view to, const int loc, const bool pch)
 {
-    symbol_t fid, tid;
+    auto fid = Symbol{};
+    auto tid = Symbol{};
     if (!resolve(from, fid) || !fid.get_type().is_instance_line()) {
         handle_error(TypeException{"$No_such_instance_line_(source)"});
     } else if (!resolve(to, tid) || !tid.get_type().is_instance_line()) {
@@ -586,24 +507,25 @@ void DocumentBuilder::proc_message(const char* from, const char* to, const int l
     }
 }
 
-void DocumentBuilder::proc_message(synchronisation_t type)  // Label
+void DocumentBuilder::proc_message(Synchronisation type)  // Label
 {
-    if (currentMessage)
-        currentMessage->label = expression_t::create_sync(fragments[0], type, position);
+    if (currentMessage != nullptr)
+        currentMessage->label = Expression::create_sync(fragments[0], type, position);
     fragments.pop();
 }
 
 /**
  * Add a condition to the current template.
  */
-void DocumentBuilder::proc_condition(const vector<string>& anchors, const int loc, const bool pch, const bool hot)
+void DocumentBuilder::proc_condition(const std::vector<std::string>& anchors, const int loc, const bool pch,
+                                     const bool hot)
 {
-    vector<symbol_t> v_anchorid;
-    bool error = false;
-    bool isHot = hot;
+    auto v_anchorid = std::vector<Symbol>{};
+    auto error = false;
+    auto isHot = hot;
 
     for (const auto& anchor : anchors) {
-        symbol_t anchorid;
+        Symbol anchorid;
         if (!resolve(anchor.c_str(), anchorid) || !anchorid.get_type().is_instance_line()) {
             handle_error(TypeException{"$No_such_instance_line_(anchor)"});
             error = true;
@@ -623,7 +545,7 @@ void DocumentBuilder::proc_condition(const vector<string>& anchors, const int lo
 
 void DocumentBuilder::proc_condition()
 {
-    if (currentCondition)
+    if (currentCondition != nullptr)
         currentCondition->label = fragments[0];
     fragments.pop();
 }
@@ -631,9 +553,9 @@ void DocumentBuilder::proc_condition()
 /**
  * Add an update to the current template.
  */
-void DocumentBuilder::proc_LSC_update(const char* anchor, const int loc, const bool pch)
+void DocumentBuilder::proc_LSC_update(std::string_view anchor, const int loc, const bool pch)
 {
-    symbol_t anchorid;
+    auto anchorid = Symbol{};
 
     if (!resolve(anchor, anchorid) || !anchorid.get_type().is_instance_line()) {
         handle_error(TypeException{"$No_such_instance_line_(anchor)"});
@@ -645,27 +567,26 @@ void DocumentBuilder::proc_LSC_update(const char* anchor, const int loc, const b
 
 void DocumentBuilder::proc_LSC_update()  // Label
 {
-    if (currentUpdate)
+    if (currentUpdate != nullptr)
         currentUpdate->label = fragments[0];
     fragments.pop();
 }
 
 void DocumentBuilder::prechart_set(const bool pch) { currentTemplate->has_prechart = pch; }
 
-void DocumentBuilder::decl_dynamic_template(const std::string& name)
+void DocumentBuilder::decl_dynamic_template(std::string_view name)
 {
     // Should be null, but error recovery can result in proc_end not being called
     if (currentTemplate != nullptr) {
         currentTemplate = nullptr;
         declarations.pop();
     }
-    /* check if name already exists */
-    if (frames.top().contains(name)) {
-        handle_error(DuplicateDefinitionError(name));
-    }
+    // check if name already exists
+    if (frames.top().contains(name))
+        handle_error(duplicate_definition_error(name));
 
-    for (size_t i = 0; i < params.get_size(); i++) {
-        if (!params[i].get_type().is_integer() && !params[i].get_type().isBoolean() &&
+    for (uint32_t i = 0; i < params.get_size(); i++) {
+        if (!params[i].get_type().is_integer() && !params[i].get_type().is_boolean() &&
             !(params[i].get_type().is(REF) && params[i].get_type()[0].is(BROADCAST)))
             handle_error(TypeException{"Dynamic template parameters can either be boolean or integer and "
                                        "cannot be references"});
@@ -673,84 +594,73 @@ void DocumentBuilder::decl_dynamic_template(const std::string& name)
 
     document.add_dynamic_template(name, params, position);
 
-    params = frame_t::create();  // reset params
+    params = Frame::make();  // reset params
 }
 
-void DocumentBuilder::query_begin() { currentQuery = std::make_unique<query_t>(); }
-void DocumentBuilder::query_formula(const char* formula, const char* location)
+void DocumentBuilder::query_begin() { currentQuery = std::make_unique<Query>(); }
+void DocumentBuilder::query_formula(std::string_view formula, std::string_view location)
 {
-    if (formula) {
-        currentQuery->formula = formula;
-    }
-    if (location) {
-        currentQuery->location = location;
-    }
+    currentQuery->formula = formula;
+    currentQuery->location = location;
 }
-void DocumentBuilder::query_comment(const char* comment)
+void DocumentBuilder::query_comment(std::string_view comment) { currentQuery->comment = comment; }
+void DocumentBuilder::query_options(std::string_view key, std::string_view value)
 {
-    if (comment) {
-        currentQuery->comment = comment;
-    }
-}
-void DocumentBuilder::query_options(const char* key, const char* value)
-{
-    if (key == nullptr) {
+    if (key.empty())
         handle_error(TypeException{"options tag found without attribute 'key'"});
-    }
-    currentQuery->options.push_back(option_t{key, value == nullptr ? "" : value});
+    currentQuery->options.emplace_back(std::string{key}, std::string{value});
 }
 
-void DocumentBuilder::expectation_begin() { currentExpectation = new expectation_t; }
+void DocumentBuilder::expectation_begin() { currentExpectation = std::make_unique<Expectation>(); }
 
 void DocumentBuilder::expectation_end()
 {
-    currentQuery->expectation = *currentExpectation;
-    delete currentExpectation;
-    currentExpectation = nullptr;
+    currentQuery->expectation = std::move(*currentExpectation);
+    currentExpectation.reset();
 }
 
-void DocumentBuilder::expectation_value(const char* res, const char* type, const char* value)
+void DocumentBuilder::expectation_value(std::string_view res, std::string_view type, std::string_view value)
 {
-    expectation_type _type;
-    if (!type) {
-        _type = expectation_type::_ErrorValue;
-    } else if (strcmp(type, "probability") == 0) {
-        _type = expectation_type::Probability;
-    } else if (strcmp(type, "symbolic")) {
-        _type = expectation_type::Symbolic;
-    } else if (strcmp(type, "value")) {
-        _type = expectation_type::NumericValue;
+    auto _type = ExpectationKind{};
+    if (type.empty()) {
+        _type = ExpectationKind::_ErrorValue;
+    } else if (type == "probability"sv) {
+        _type = ExpectationKind::Probability;
+    } else if (type == "symbolic"sv) {
+        _type = ExpectationKind::Symbolic;
+    } else if (type == "value"sv) {
+        _type = ExpectationKind::NumericValue;
     } else {
-        _type = expectation_type::_ErrorValue;
+        _type = ExpectationKind::_ErrorValue;
     }
-    if (res == nullptr) {
-        currentExpectation->status = query_status_t::Unknown;
-    } else if (strcmp(res, "success") == 0) {
-        currentExpectation->status = query_status_t::True;
-    } else if (strcmp(res, "failure")) {
-        currentExpectation->status = query_status_t::False;
-    } else if (strcmp(res, "maybe_true") == 0) {
-        currentExpectation->status = query_status_t::MaybeTrue;
-    } else if (strcmp(res, "maybe_false") == 0) {
-        currentExpectation->status = query_status_t::MaybeFalse;
+    if (res.empty()) {
+        currentExpectation->status = QueryStatus::Unknown;
+    } else if (res == "success"sv) {
+        currentExpectation->status = QueryStatus::True;
+    } else if (res == "failure"sv) {
+        currentExpectation->status = QueryStatus::False;
+    } else if (res == "maybe_true"sv) {
+        currentExpectation->status = QueryStatus::MaybeTrue;
+    } else if (res == "maybe_false"sv) {
+        currentExpectation->status = QueryStatus::MaybeFalse;
     } else {
-        currentExpectation->status = query_status_t::Unknown;
+        currentExpectation->status = QueryStatus::Unknown;
     }
     currentExpectation->value_type = _type;
     currentExpectation->value = value;
 }
 
-void DocumentBuilder::expect_resource(const char* type, const char* value, const char* unit)
+void DocumentBuilder::expect_resource(std::string_view type, std::string_view value, std::string_view unit)
 {
-    if (type == nullptr) {
+    if (type.empty()) {
         handle_error(TypeException{"missing name of resource in expectation"});
         return;
     }
-    if (value == nullptr) {
+    if (value.empty()) {
         handle_error(TypeException{"missing value of resource in expectation"});
     }
-    currentExpectation->resources.push_back(
-        resource_t{type, value, unit == nullptr ? std::nullopt : std::make_optional(unit)});
+    currentExpectation->resources.emplace_back(std::string{type}, std::string{value},
+                                               unit.empty() ? std::nullopt : std::make_optional<std::string>(unit));
 }
 
 void DocumentBuilder::query_results_begin() {}
@@ -763,10 +673,9 @@ void DocumentBuilder::query_end()
     currentQuery.reset();
 }
 
-void DocumentBuilder::model_option(const char* key, const char* value)
+void DocumentBuilder::model_option(std::string_view key, std::string_view value)
 {
-    if (key == nullptr) {
+    if (key.empty())
         handle_error(TypeException{"options tag found without attribute 'key'"});
-    }
-    document.get_options().emplace_back(key, value == nullptr ? "" : value);
+    document.get_options().emplace_back(std::string{key}, std::string{value});
 }

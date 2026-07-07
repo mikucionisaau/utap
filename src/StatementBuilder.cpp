@@ -22,11 +22,12 @@
 #include "utap/StatementBuilder.hpp"
 
 #include <filesystem>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
+
 #include <cassert>
 #include <cinttypes>
-#include <cstring>
 
 #ifdef __MINGW32__
 #include <windows.h>
@@ -37,29 +38,26 @@
 using namespace UTAP;
 using namespace Constants;
 
-using std::vector;
-using std::string;
-
 StatementBuilder::StatementBuilder(Document& doc, std::vector<std::filesystem::path> libpaths):
     ExpressionBuilder{doc}, libpaths{std::move(libpaths)}
 {
     this->libpaths.insert(this->libpaths.begin(), std::filesystem::current_path());
-    this->libpaths.insert(this->libpaths.begin(), "");
+    this->libpaths.emplace(this->libpaths.begin(), "");
 }
 
-void StatementBuilder::collectDependencies(std::set<symbol_t>& dependencies, expression_t expr)
+void StatementBuilder::collect_dependencies(std::set<Symbol>& dependencies, const Expression& expr)
 {
-    std::set<symbol_t> symbols;
+    auto symbols = std::set<Symbol>{};
     expr.collect_possible_reads(symbols);
     while (!symbols.empty()) {
-        symbol_t s = *symbols.begin();
+        Symbol s = *symbols.begin();
         symbols.erase(s);
         if (dependencies.find(s) == dependencies.end()) {
             dependencies.insert(s);
-            if (auto d = s.get_data(); d) {
+            if (auto* d = s.get_data(); d != nullptr) {
                 if (auto t = s.get_type(); !(t.is_function() || t.is_function_external())) {
                     // assume is its variable, which is not always true
-                    variable_t* v = static_cast<variable_t*>(d);
+                    auto* v = static_cast<Variable*>(d);
                     v->init.collect_possible_reads(symbols);
                 } else {
                     // TODO; fixme.
@@ -69,50 +67,45 @@ void StatementBuilder::collectDependencies(std::set<symbol_t>& dependencies, exp
     }
 }
 
-void StatementBuilder::collectDependencies(std::set<symbol_t>& dependencies, type_t type)
+void StatementBuilder::collect_dependencies(std::set<Symbol>& dependencies, const Type& type)
 {
     if (type.get_kind() == RANGE) {
         auto [lower, upper] = type.get_range();
-        collectDependencies(dependencies, lower);
-        collectDependencies(dependencies, upper);
-        collectDependencies(dependencies, type[0]);
+        collect_dependencies(dependencies, lower);
+        collect_dependencies(dependencies, upper);
+        collect_dependencies(dependencies, type[0]);
     } else {
-        for (size_t i = 0; i < type.size(); i++) {
-            collectDependencies(dependencies, type[i]);
-        }
+        for (uint32_t i = 0; i < type.size(); ++i)
+            collect_dependencies(dependencies, type[i]);
     }
 }
 
-void StatementBuilder::type_array_of_size(size_t n)
+void StatementBuilder::type_array_of_size(uint32_t n)
 {
-    /* Pop array size of fragments stack.
-     */
-    expression_t expr = fragments[0];
-    fragments.pop();
+    // Pop array size of fragments stack.
+    Expression expr = fragments.pop();
 
-    /* Create type.
-     */
+    // Create type.
     expr_nat(0);
     fragments.push(expr);
     expr_nat(1);
     expr_binary(MINUS);
-    type_bounded_int(PREFIX_NONE);
+    type_bounded_int(TypePrefix::NONE);
     type_array_of_type(n + 1);
 }
 
-void StatementBuilder::type_array_of_type(size_t n)
+void StatementBuilder::type_array_of_type(uint32_t n)
 {
-    type_t size = typeFragments[0];
-    typeFragments.pop();
-    typeFragments[n - 1] = type_t::create_array(typeFragments[n - 1], size, position);
+    Type size = typeFragments.pop();
+    typeFragments[n - 1] = Type::create_array(typeFragments[n - 1], size, position);
 
     /* If template local declaration, then mark all symbols in 'size'
      * and those that they depend on as restricted. Otherwise we would
      * not be able to compute the offset of a process in a set of
      * processes.
      */
-    if (currentTemplate) {
-        collectDependencies(currentTemplate->restricted, size);
+    if (currentTemplate != nullptr) {
+        collect_dependencies(currentTemplate->restricted, size);
     }
 
     if ((!size.is_integer() && !size.is_scalar()) || !size.is(RANGE)) {
@@ -125,35 +118,33 @@ void StatementBuilder::type_array_of_type(size_t n)
  * type stack. The type is based on n fields, which are expected to be
  * on and will be popped off the type stack.
  */
-void StatementBuilder::type_struct(PREFIX prefix, uint32_t n)
+void StatementBuilder::type_struct(TypePrefix prefix, uint32_t n)
 {
-    auto f = vector<type_t>(fields.end() - n, fields.end());
-    auto l = vector<string>(labels.end() - n, labels.end());
-    auto p = vector<position_t>(positions.end() - n, positions.end());
+    auto f = std::vector<Type>(fields.end() - n, fields.end());
+    auto l = std::vector<std::string>(labels.end() - n, labels.end());
+    auto p = std::vector<position_t>(positions.end() - n, positions.end());
 
     fields.erase(fields.end() - n, fields.end());
     labels.erase(labels.end() - n, labels.end());
     positions.erase(positions.end() - n, positions.end());
 
-    typeFragments.push(apply_prefix(prefix, type_t::create_record(f, l, p, position)));
+    typeFragments.push(apply_prefix(prefix, Type::create_record(f, l, p, position)));
 }
 
 /**
  * Used to declare the fields of a structure. The type of the field is
  * expected to be on the type fragment stack.
  */
-void StatementBuilder::struct_field(const char* name)
+void StatementBuilder::struct_field(std::string_view name)
 {
-    type_t type = typeFragments[0];
-    typeFragments.pop();
+    auto type = typeFragments.pop();
 
     // Constant fields are not allowed
-    if (type.is(CONSTANT)) {
+    if (type.is(CONSTANT))
         handle_error(TypeException{"$Constant_fields_not_allowed_in_struct"});
-    }
 
     fields.push_back(type);
-    labels.push_back(name);
+    labels.emplace_back(name);
     positions.push_back(position);
 
     /* Check the base type. We should check this in the type
@@ -161,7 +152,7 @@ void StatementBuilder::struct_field(const char* name)
      * types, hence we cannot place the error message if we wait until
      * the type check phase.
      */
-    type_t base = type.strip_array();
+    auto base = type.strip_array();
     if (!base.is_record() && !base.is_scalar() && !base.is_integral() && !base.is_double() && !base.is_clock()) {
         handle_error(TypeException{"$Invalid_type_in_structure"});
     }
@@ -172,24 +163,22 @@ void StatementBuilder::struct_field(const char* name)
  * fragment stack. In case of array types, dim constant expressions
  * are expected on and popped from the expression stack.
  */
-void StatementBuilder::decl_typedef(const char* name)
+void StatementBuilder::decl_typedef(std::string_view name)
 {
     bool duplicate = frames.top().contains(name);
-    type_t type = type_t::create_typedef(name, typeFragments[0], position);
+    Type type = Type::create_typedef(std::string{name}, typeFragments[0], position);
     typeFragments.pop();
-    if (duplicate) {
-        throw DuplicateDefinitionError(name);
-    }
-
+    if (duplicate)
+        throw duplicate_definition_error(name);
     frames.top().add_symbol(name, type, position);
 }
 
-static bool initialisable(type_t type)
+static bool initialisable(Type type)
 {
     type = type.strip();
     switch (type.get_kind()) {
     case RECORD:
-        for (size_t i = 0; i < type.size(); i++) {
+        for (auto i = 0u; i < type.size(); i++) {
             if (!initialisable(type[i])) {
                 return false;
             }
@@ -206,7 +195,7 @@ static bool initialisable(type_t type)
     }
 }
 
-static bool mustInitialise(type_t type)
+static bool mustInitialise(const Type& type)
 {
     const auto k = type.get_kind();
     assert(k != FUNCTION);
@@ -218,7 +207,7 @@ static bool mustInitialise(type_t type)
     switch (k) {
     case CONSTANT: return true;
     case RECORD:
-        for (size_t i = 0; i < type.size(); i++) {
+        for (auto i = 0u; i < type.size(); i++) {
             if (mustInitialise(type[i])) {
                 return true;
             }
@@ -235,17 +224,15 @@ static bool mustInitialise(type_t type)
  * top of the expression stack.  The expressions will be popped of the
  * stack (the type is left untouched).
  */
-void StatementBuilder::decl_var(const char* name, bool hasInit)
+void StatementBuilder::decl_var(std::string_view name, bool hasInit)
 {
     // Pop initial value
-    expression_t init;
-    if (hasInit) {
-        init = fragments[0];
-        fragments.pop();
-    }
+    Expression init;
+    if (hasInit)
+        init = fragments.pop();
 
     // Construct type
-    type_t type = typeFragments[0];
+    Type type = typeFragments[0];
     typeFragments.pop();
 
     // Check whether initialiser is allowed/required
@@ -257,12 +244,12 @@ void StatementBuilder::decl_var(const char* name, bool hasInit)
         handle_error(TypeException{"$Constants_must_have_an_initialiser"});
     }
 
-    if (currentFun && !initialisable(type)) {
+    if (currentFun != nullptr && !initialisable(type)) {
         handle_error(TypeException{"$Type_is_not_allowed_in_functions"});
     }
 
     // Add variable to document
-    addVariable(type, name, init, position);
+    add_variable(type, name, init, position);
 }
 
 // Array and struct initialisers are represented as expressions having
@@ -293,27 +280,72 @@ void StatementBuilder::decl_var(const char* name, bool hasInit)
 // initialiser is used (i.e. a list of fields), then the type
 // requirements are much less strict.
 
-void StatementBuilder::decl_field_init(const char* name)
+void StatementBuilder::decl_field_init(std::string_view name)
 {
-    type_t type = fragments[0].get_type().create_label(name, position);
+    Type type = fragments[0].get_type().create_label(name, position);
     fragments[0].set_type(type);
+}
+
+Expression StatementBuilder::make_initialiser(const Type& type, const Expression& init)
+{
+    if (type.is_assignment_compatible(init.get_type(), true)) {
+        return init;
+    } else if (type.is_array() && init.get_kind() == LIST) {
+        auto subtype = type.get_sub();
+        auto result = std::vector<Expression>(init.get_size());
+        for (uint32_t i = 0; i < init.get_type().size(); i++)
+            result[i] = make_initialiser(subtype, init[i]);
+        return Expression::create_nary(LIST, result, init.get_position(), type);
+    } else if (type.is_record() && init.get_kind() == LIST) {
+        /* In order to access the record labels we have to strip any
+         * prefixes and labels from the record type.
+         */
+        auto result = std::vector<Expression>(type.get_record_size());
+        auto current = uint32_t{0};
+        for (uint32_t i = 0; i < init.get_type().size(); ++i, ++current) {
+            const auto& label = init.get_type().get_label(i);
+            if (!label.empty()) {
+                auto index = type.find_index_of(label);
+                if (!index) {
+                    document.add_error(init[i].get_position(), "$Unknown_field", type.str());
+                    break;
+                } else {
+                    current = *index;
+                }
+            }
+            if (current >= type.get_record_size()) {
+                document.add_error(init[i].get_position(), "$Too_many_elements_in_initialiser", type.str());
+                break;
+            }
+            if (!result[current].empty()) {
+                document.add_error(init[i].get_position(), "$Multiple_initialisers_for_field", type.str());
+                continue;
+            }
+            result[current] = make_initialiser(type.get_sub(current), init[i]);
+        }
+        return Expression::create_nary(LIST, result, init.get_position(), type);
+    }
+    document.add_error(init.get_position(), "$Invalid_initialiser", type.str());
+    return init;
 }
 
 void StatementBuilder::decl_init_list(uint32_t num)
 {
     // Pop fields
-    vector<expression_t> fields(num);
-    for (uint32_t i = 0; i < num; i++) {
+    auto fields = std::vector<Expression>(num);
+    for (uint32_t i = 0; i < num; ++i)
         fields[i] = fragments[num - 1 - i];
-    }
     fragments.pop(num);
 
     // Compute new type (each field has a label type, see decl_field_init())
-    vector<type_t> types;
-    vector<string> labels;
-    vector<position_t> positions;
+    auto types = std::vector<Type>{};
+    types.reserve(num);
+    auto labels = std::vector<std::string>{};
+    labels.reserve(num);
+    auto positions = std::vector<position_t>{};
+    positions.reserve(num);
     for (uint32_t i = 0; i < num; i++) {
-        type_t type = fields[i].get_type();
+        auto type = fields[i].get_type();
         types.push_back(type[0]);
         labels.push_back(type.get_label(0));
         fields[i].set_type(type[0]);
@@ -321,22 +353,17 @@ void StatementBuilder::decl_init_list(uint32_t num)
     }
 
     // Create list expression
-    fragments.push(
-        expression_t::create_nary(LIST, fields, position, type_t::create_record(types, labels, positions, position)));
+    fragments.push(Expression::create_nary(LIST, fields, position, Type::create_record(types, labels, positions, position)));
 }
 
 /********************************************************************
  * Function declarations
  */
-void StatementBuilder::decl_parameter(const char* name, bool ref)
+void StatementBuilder::decl_parameter(std::string_view name, bool ref)
 {
-    type_t type = typeFragments[0];
-    typeFragments.pop();
-
-    if (ref) {
+    Type type = typeFragments.pop();
+    if (ref)
         type = type.create_prefix(REF);
-    }
-
     params.add_symbol(name, type, position);
 }
 
@@ -355,35 +382,33 @@ void StatementBuilder::func_type()
         blocks.clear();
     }
 
-    type_t return_type = typeFragments[0];
+    Type return_type = typeFragments[0];
 
-    vector<type_t> types;
-    vector<string> labels;
-    for (size_t i = 0; i < params.get_size(); i++) {
-        types.push_back(params[i].get_type());
-        labels.push_back(params[i].get_name());
+    auto types = std::vector<Type>(params.get_size());
+    auto labels = std::vector<std::string>(params.get_size());
+    for (auto i = 0u; i < params.get_size(); i++) {
+        types[i] = params[i].get_type();
+        labels[i] = params[i].get_name();
     }
 
-    typeFragments[0] = type_t::create_function(return_type, types, labels, position);
+    typeFragments[0] = Type::create_function(return_type, types, labels, position);
 }
 
-void StatementBuilder::decl_func_begin(const char* name)
+void StatementBuilder::decl_func_begin(std::string_view name)
 {
-    type_t type = typeFragments[0];
-    typeFragments.pop();
+    Type type = typeFragments.pop();
 
-    if (!addFunction(type, name, position)) {
-        handle_error(DuplicateDefinitionError(name));
+    if (!add_function(type, name, position)) {
+        handle_error(duplicate_definition_error(name));
     }
 
     /* We maintain a stack of frames. As the function has a local
      * scope, we push a new frame and move the parameters to it.
      */
-    push_frame(frame_t::create(frames.top()));
+    push_frame(frames.top().make_sub());
     params.move_to(frames.top());  // params is emptied here
 
-    /* Create function block.
-     */
+    // Create function block.
     currentFun->body = std::make_unique<BlockStatement>(frames.top());
 }
 
@@ -394,11 +419,10 @@ void StatementBuilder::decl_func_end()
     assert(currentFun);
     assert(currentFun->body);
 
-    /* Recover from unterminated blocks - delete any excess blocks.
-     */
+    // Recover from unterminated blocks - delete any excess blocks.
     blocks.clear();
 
-    /* If function has a non void return type, then check that last
+    /* If function has a non-void return type, then check that last
      * statement is a return statement.
      */
     if (!currentFun->uid.get_type()[0].is_void() && !currentFun->body->returns()) {
@@ -407,34 +431,34 @@ void StatementBuilder::decl_func_end()
 
     currentFun->body_position = position;
 
-    /* Restore global frame.
-     */
-    popFrame();
+    // Restore global frame.
+    pop_frame();
 
-    /* Reset current function pointer to NULL.
-     */
+    // Reset current function pointer to NULL.
     currentFun = nullptr;
 }
 
-void StatementBuilder::dynamic_load_lib(const char* lib)
+void StatementBuilder::dynamic_load_lib(std::string_view lib)
 {
-    // check that we have a library
-    size_t len = strlen(lib);
-    if (len <= 2) {
+    auto name = std::string{};
+    {  // strip the quote marks
+        auto is = std::istringstream{std::string{lib}};
+        is >> std::quoted(name);
+    }
+    if (name.empty()) {
         handle_error(TypeException{"Cannot_load_empty_library_path"});
         return;
     }
-    auto name = std::string(lib + 1, len - 2);  // strip the quote marks
-    auto errors = std::vector<std::string>{};   // buffer the errors
+    auto errors = std::vector<std::string>{};  // buffer the errors
     auto success = false;
     for (const auto& dir : libpaths) {
         auto path = dir / name;
         try {
-            document.add(Library{path.string().c_str()});
+            document.add(Library{path.string()});
             success = true;
             break;
         } catch (const std::runtime_error& ex) {
-            errors.push_back(ex.what());
+            errors.emplace_back(ex.what());
             continue;
         }
     }
@@ -444,32 +468,32 @@ void StatementBuilder::dynamic_load_lib(const char* lib)
     }
 }
 
-void StatementBuilder::decl_external_func(const char* name, const char* alias)
+void StatementBuilder::decl_external_func(std::string_view name, std::string_view alias)
 {
     assert(currentFun == nullptr);
 
-    type_t return_type = typeFragments[0];
-    typeFragments.pop();
+    auto return_type = typeFragments.pop();
 
-    vector<type_t> types;
-    vector<string> labels;
-    for (size_t i = 0; i < params.get_size(); i++) {
-        types.push_back(params[i].get_type());
-        labels.push_back(params[i].get_name());
+    auto types = std::vector<Type>{};
+    types.reserve(params.get_size());
+    auto labels = std::vector<std::string>{};
+    labels.reserve(params.get_size());
+    for (const auto& param : params) {
+        types.push_back(param.get_type());
+        labels.push_back(param.get_name());
     }
 
     void* fp = nullptr;
     try {
-        fp = document.last_library().get_symbol(name);
+        fp = document.last_library().get_symbol(std::string{name});
     } catch (const std::runtime_error& ex) {
         handle_error(TypeException{ex.what()});
     }
 
-    type_t type = type_t::create_external_function(return_type, types, labels, position);
-    if (!addFunction(type, alias, position_t())) {
-        handle_error(DuplicateDefinitionError(alias));
-    }
-    push_frame(frame_t::create(frames.top()));
+    auto type = Type::create_external_function(return_type, types, labels, position);
+    if (!add_function(type, alias, position_t()))
+        handle_error(duplicate_definition_error(alias));
+    push_frame(frames.top().make_sub());
     params.move_to(frames.top());  // params is emptied here
     currentFun->body = std::make_unique<ExternalBlockStatement>(frames.top(), fp, !return_type.is_void());
     decl_func_end();
@@ -480,7 +504,7 @@ void StatementBuilder::decl_external_func(const char* name, const char* alias)
  */
 void StatementBuilder::block_begin()
 {
-    push_frame(frame_t::create(frames.top()));
+    push_frame(frames.top().make_sub());
     blocks.push_back(std::make_unique<BlockStatement>(frames.top()));
 }
 
@@ -490,134 +514,115 @@ void StatementBuilder::block_end()
     // the containing block.
     std::unique_ptr<BlockStatement> block = std::move(blocks.back());
     blocks.pop_back();
-    get_block().push_stat(std::move(block));
+    get_block().push(std::move(block));
 
     // Restore containing frame
-    popFrame();
+    pop_frame();
 }
 
-void StatementBuilder::empty_statement() { get_block().push_stat(std::make_unique<EmptyStatement>()); }
+void StatementBuilder::empty_statement() { get_block().push(std::make_unique<EmptyStatement>()); }
 
 void StatementBuilder::for_begin() {}
 
 void StatementBuilder::for_end()
 {  // 3 expr, 1 stat
-    auto substat = get_block().pop_stat();
-    auto forstat = std::make_unique<ForStatement>(fragments[2], fragments[1], fragments[0], std::move(substat));
-    get_block().push_stat(std::move(forstat));
-
-    fragments.pop(3);
+    auto substat = get_block().pop();
+    auto step = fragments.pop();
+    auto cond = fragments.pop();
+    auto init = fragments.pop();
+    auto forstat = std::make_unique<ForStatement>(init, cond, step, std::move(substat));
+    get_block().push(std::move(forstat));
 }
 
-void StatementBuilder::iteration_begin(const char* name)
+void StatementBuilder::iteration_begin(std::string_view name)
 {
-    type_t type = typeFragments[0];
-    typeFragments.pop();
-
-    /* The iterator cannot be modified.
-     */
+    Type type = typeFragments.pop();
+    // The iterator cannot be modified.
     if (!type.is(CONSTANT)) {
         type = type.create_prefix(CONSTANT);
     }
 
-    /* The iteration statement has a local scope for the iterator.
-     */
-    push_frame(frame_t::create(frames.top()));
+    // The iteration statement has a local scope for the iterator.
+    push_frame(frames.top().make_sub());
 
-    /* Add variable.
-     */
-    variable_t* variable = addVariable(type, name, expression_t(), position_t());
+    // Add variable.
+    Variable* variable = add_variable(type, name, Expression(), position_t());
 
     /* Create a new statement for the loop. We need to already create
      * this here as the statement is the only thing that can keep the
      * reference to the frame.
      */
-    get_block().push_stat(std::make_unique<IterationStatement>(variable->uid, frames.top(), nullptr));
+    get_block().push(std::make_unique<RangeStatement>(variable->uid, frames.top(), nullptr));
 }
 
-void StatementBuilder::iteration_end(const char* name)
+void StatementBuilder::iteration_end(std::string_view name)
 {
-    /* Retrieve the statement that we iterate over.
-     */
-    auto statement = get_block().pop_stat();
-
+    // Retrieve the statement that we iterate over.
+    auto statement = get_block().pop();
     if (!get_block().empty()) {
         // If the syntax is wrong, we won't have anything in blocks.back()
         /* Add statement to loop construction.  */
-        static_cast<IterationStatement*>(get_block().back())->stat = std::move(statement);
+        static_cast<RangeStatement&>(get_block().back()).stat = std::move(statement);
     }
-
-    /* Restore the frame pointer.
-     */
-    popFrame();
+    // Restore the frame pointer.
+    pop_frame();
 }
 
 void StatementBuilder::while_begin() {}
 
 void StatementBuilder::while_end()
 {  // 1 expr, 1 stat
-    auto whilestat = std::make_unique<WhileStatement>(fragments[0], get_block().pop_stat());
-    get_block().push_stat(std::move(whilestat));
-    fragments.pop();
+    auto whilestat = std::make_unique<WhileStatement>(fragments.pop(), get_block().pop());
+    get_block().push(std::move(whilestat));
 }
 
 void StatementBuilder::do_while_begin() {}
 
 void StatementBuilder::do_while_end()
 {  // 1 stat, 1 expr
-    auto substat = get_block().pop_stat();
-    get_block().push_stat(std::make_unique<DoWhileStatement>(std::move(substat), fragments[0]));
-    fragments.pop();
+    auto substat = get_block().pop();
+    get_block().push(std::make_unique<DoWhileStatement>(std::move(substat), fragments.pop()));
 }
 
 void StatementBuilder::if_end(bool elsePart)
 {  // 1 expr, 1 or 2 statements
     std::unique_ptr<Statement> falseCase;
     if (elsePart)
-        falseCase = get_block().pop_stat();
-    auto trueCase = get_block().pop_stat();
-    auto ifstat = std::make_unique<IfStatement>(fragments[0], std::move(trueCase), std::move(falseCase));
-    get_block().push_stat(std::move(ifstat));
-    fragments.pop();
+        falseCase = get_block().pop();
+    auto trueCase = get_block().pop();
+    auto ifstat = std::make_unique<IfStatement>(fragments.pop(), std::move(trueCase), std::move(falseCase));
+    get_block().push(std::move(ifstat));
 }
 
 void StatementBuilder::expr_statement()
 {  // 1 expr
-    get_block().push_stat(std::make_unique<ExprStatement>(fragments[0]));
-    fragments.pop();
+    get_block().push(std::make_unique<ExprStatement>(fragments.pop()));
 }
 
 void StatementBuilder::return_statement(bool args)
 {  // 1 expr if argument is true
-    if (!currentFun) {
+    if (currentFun == nullptr) {
         handle_error(TypeException{"$Cannot_return_outside_of_function_declaration"});
     } else {
         /* Only functions with non-void return type are allowed to have
          * arguments on return.
          */
-        type_t return_type = currentFun->uid.get_type()[0];
+        const Type& return_type = currentFun->uid.get_type()[0];
         if (return_type.is_void() && args) {
             handle_error(TypeException{"$return_with_a_value_in_function_returning_void"});
         } else if (!return_type.is_void() && !args) {
             handle_error(TypeException{"$return_with_no_value_in_function_returning_non-void"});
         }
-
         std::unique_ptr<ReturnStatement> stat;
-        if (args) {
-            stat = std::make_unique<ReturnStatement>(fragments[0]);
-            fragments.pop();
-        } else {
+        if (args)
+            stat = std::make_unique<ReturnStatement>(fragments.pop());
+        else
             stat = std::make_unique<ReturnStatement>();
-        }
-        get_block().push_stat(std::move(stat));
+        get_block().push(std::move(stat));
     }
 }
 
-void StatementBuilder::assert_statement()
-{
-    get_block().push_stat(std::make_unique<AssertStatement>(fragments[0]));
-    fragments.pop();
-}
+void StatementBuilder::assert_statement() { get_block().push(std::make_unique<AssertStatement>(fragments.pop())); }
 
 /********************************************************************
  * Expressions

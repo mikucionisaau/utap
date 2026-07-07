@@ -22,9 +22,9 @@
 #define INCLUDE_UTAP_DOCUMENT_FIXTURE_HPP
 
 #include "utap/StatementBuilder.hpp"
-#include "utap/property.h"
-#include "utap/typechecker.h"
-#include "utap/utap.h"
+#include "utap/TypeChecker.hpp"
+#include "utap/property.hpp"
+#include "utap/utap.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -32,6 +32,21 @@
 #include <stdexcept>
 #include <string>
 #include <cstring>
+
+/// Checks text containment in unit testing
+class Contains
+{
+    std::string_view text;
+
+public:
+    Contains(std::string_view text): text{text} {}
+    friend bool operator==(std::string_view text, const Contains& sub)
+    {
+        return text.find(sub.text) != std::string_view::npos;
+    }
+    friend bool operator!=(std::string_view text, const Contains& sub) { return !(text == sub); }
+    friend std::ostream& operator<<(std::ostream& os, const Contains& sub) { return os << sub.text; }
+};
 
 inline std::string read_content(const std::string& file_name)
 {
@@ -45,10 +60,10 @@ inline std::string read_content(const std::string& file_name)
     return content;
 }
 
-std::unique_ptr<UTAP::Document> read_document(const std::string& file_name)
+UTAP::Document read_document(const std::string& file_name)
 {
-    auto doc = std::make_unique<UTAP::Document>();
-    auto res = parse_XML_buffer(read_content(file_name).c_str(), doc.get(), true);
+    auto doc = UTAP::Document();
+    auto res = parse_XML_buffer(read_content(file_name).c_str(), doc, true);
     if (res != 0)
         throw std::logic_error("Failed to parse document");
     return doc;
@@ -71,7 +86,7 @@ std::string replace_all(std::string text, const std::string& what, const std::st
 {
     for (auto pos = text.find(what); pos != std::string::npos; pos = text.find(what, pos + 1))
         text.replace(pos, what.length(), with);
-    return std::move(text);
+    return text;
 }
 
 std::string escape_xml(std::string text)
@@ -79,7 +94,7 @@ std::string escape_xml(std::string text)
     text = replace_all(std::move(text), "&", "&amp;");
     text = replace_all(std::move(text), "<", "&lt;");
     text = replace_all(std::move(text), ">", "&gt;");
-    return std::move(text);
+    return text;
 }
 
 class template_fixture
@@ -122,11 +137,17 @@ private:
 
 class QueryBuilder : public UTAP::StatementBuilder
 {
-    UTAP::expression_t query;
+    UTAP::Expression query;
     UTAP::TypeChecker checker;
 
 public:
-    explicit QueryBuilder(UTAP::Document& doc): UTAP::StatementBuilder{doc}, checker{doc} {}
+    explicit QueryBuilder(UTAP::Document& doc): UTAP::StatementBuilder{doc}, checker{doc}
+    {
+        // The document is already fully parsed, so builtin_decl_end() was never
+        // called for this builder. Push the innermost declaration frame so
+        // property expressions can resolve global and system declarations.
+        push_frame(doc.get_system_declarations().frame);
+    }
     void property() override
     {
         if (fragments.size() == 0)
@@ -135,15 +156,15 @@ public:
         query = fragments[0];
         fragments.pop();
     }
-    void strategy_declaration(const char* strategy_name) override {}
+    void strategy_declaration(std::string_view strategy_name) override {}
     void typecheck() { checker.checkExpression(query); }
-    [[nodiscard]] UTAP::expression_t getQuery() const { return query; }
-    UTAP::variable_t* addVariable(UTAP::type_t type, const std::string& name, UTAP::expression_t init,
-                                  UTAP::position_t pos) override
+    [[nodiscard]] UTAP::Expression getQuery() const { return query; }
+    UTAP::Variable* add_variable(UTAP::Type type, std::string_view name, UTAP::Expression init,
+                                UTAP::position_t pos) override
     {
         throw UTAP::NotSupportedException(__FUNCTION__);
     }
-    bool addFunction(UTAP::type_t type, const std::string& name, UTAP::position_t pos) override
+    bool add_function(UTAP::Type type, std::string_view name, UTAP::position_t pos) override
     {
         throw UTAP::NotSupportedException(__FUNCTION__);
     }
@@ -151,22 +172,22 @@ public:
 
 class QueryFixture
 {
-    std::unique_ptr<UTAP::Document> doc;
+    UTAP::Document doc;
     UTAP::TigaPropertyBuilder query_builder;
 
 public:
-    QueryFixture(std::unique_ptr<UTAP::Document> new_doc): doc{std::move(new_doc)}, query_builder{*doc} {}
-    auto& get_errors() const { return doc->get_errors(); }
+    QueryFixture(UTAP::Document&& doc): doc{std::move(doc)}, query_builder{this->doc} {}
+    auto& get_errors() const { return doc.get_errors(); }
     const UTAP::PropInfo& parse_query(const char* query)
     {
-        auto result = parseProperty(query, &query_builder);
+        auto result = parse_property(query, query_builder);
 
-        if (result == -1 || !doc->get_errors().empty()) {
-            if (doc->get_errors().empty())
+        if (result == -1 || not doc.get_errors().empty()) {
+            if (doc.get_errors().empty())
                 throw std::logic_error("Query parsing failed with no errors");
-            throw std::logic_error(doc->get_errors()[0].msg);
+            throw std::logic_error(doc.get_errors()[0].msg);
         }
-        return query_builder.getProperties().back();
+        return query_builder.get_properties().back();
     }
 };
 
@@ -220,7 +241,7 @@ public:
     std::string str() const
     {
         static constexpr const char* document_template = R"XML(<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.5//EN' 'http://www.it.uu.se/research/group/darts/uppaal/flat-1_5.dtd'>
+<!DOCTYPE nta PUBLIC '-//Uppaal Team//DTD Flat System 1.6//EN' 'https://www.it.uu.se/research/group/darts/uppaal/flat-1_6.dtd'>
 <nta>
     <declaration>%s</declaration>%s
     <system>%s
@@ -233,11 +254,11 @@ system %s;
     }
 
     /** Derives a document from a document template and parses it */
-    [[nodiscard]] std::unique_ptr<UTAP::Document> parse() const
+    [[nodiscard]] UTAP::Document parse() const
     {
-        auto doc = std::make_unique<UTAP::Document>();
+        auto doc = UTAP::Document{};
         auto data = str();
-        parse_XML_buffer(data.c_str(), doc.get(), true);
+        parse_XML_buffer(data.c_str(), doc, true);
         return doc;
     }
 

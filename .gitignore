@@ -2,7 +2,11 @@
 /cmake-build-*
 /build-*
 /local
-/.idea
-/result
-/libs
-/.vscode
+/examples/build
+/examples/build-*
+/examples/cmake-build-*
+/examples/local
+/examples/train-gate-out.xml
+/doc/api/html
+.idea
+.vscode

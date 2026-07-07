@@ -57,7 +57,7 @@ New in 0.70
 * Most of the changes relate to the new syntax (which is used in 
   future versions of Uppaal).
 * The most visible API change is that transition_t has been renamed 
-  to edge_t.
+  to Edge.
 
 New in 0.60
 * This is a backport of the internal development code

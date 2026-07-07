@@ -1,0 +1,119 @@
+---
+name: Ubuntu MinGW
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '**.h'
+      - '**.c'
+      - '**.hpp'
+      - '**.cpp'
+      - '**.y'
+      - '**.l'
+      - '**CMakeLists.txt'
+      - 'cmake/*.cmake'
+      - 'cmake/toolchain/*mingw*.cmake'
+      - 'examples/cmake/*.cmake'
+  pull_request:
+    paths:
+      - '**.h'
+      - '**.c'
+      - '**.hpp'
+      - '**.cpp'
+      - '**.y'
+      - '**.l'
+      - '**CMakeLists.txt'
+      - 'cmake/*.cmake'
+      - 'cmake/toolchain/*mingw*.cmake'
+      - 'examples/cmake/*.cmake'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/CCACHE
+      BUILD_DIR: build-x86_64-w64-mingw32
+      CTEST_OUTPUT_ON_FAILURE: 1
+      #CROSSCOMPILING_EMULATOR: wine
+      CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/cmake/toolchain/x86_64-w64-mingw32.cmake
+      CMAKE_PREFIX_PATH: ${{ github.workspace }}/local/x86_64-w64-mingw32
+      CMAKE_INSTALL_PREFIX: ${{ github.workspace }}/local/x86_64-w64-mingw32
+      CMAKE_GENERATOR: Ninja
+      CMAKE_BUILD_TYPE: Debug
+      WINEPREFIX: ${{ github.workspace }}/.wine64
+      WINEARCH: win64
+      WINEDEBUG: fixme-all,-all
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get Ubuntu dependencies
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install curl wget unzip xz-utils bison flex cmake ninja-build ccache g++-mingw-w64-x86-64-posix wine wine-binfmt binfmt-support xvfb 
+          sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+          sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+      - name: Setup Wine
+        run: |
+          sudo update-binfmts --disable cli  # disable mono attempts to execute windows binaries
+          sudo update-binfmts --import /usr/share/binfmts/wine  # enable wine to execute windows binaries
+          rm -Rf "$WINEPREFIX"
+          xvfb-run wineboot --init   # must init WINEPREFIX before WINEPATH is set!!          
+          export WINEPATH=$($PWD/winepath-for x86_64-w64-mingw32)
+          echo "WINEPATH=$WINEPATH" >> $GITHUB_ENV
+
+      - name: Compute CCache keys
+        id: x86_64-w64-mingw32-keys
+        run: |
+          key2=ccache-x86_64-w64-mingw32-
+          key1="${key2}$(date +%W)"
+          echo "key1=${key1}" >> $GITHUB_OUTPUT
+          echo "key2=${key2}" >> $GITHUB_OUTPUT
+
+      - name: Restore CCache
+        id: ccache-restore
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.x86_64-w64-mingw32-keys.outputs.key1 }}
+          restore-keys: ${{ steps.x86_64-w64-mingw32-keys.outputs.key2 }}
+      - name: CCache limits and stats
+        run: |
+          ccache -M120M
+          ccache --show-stats
+
+      - name: Restore Libs
+        id: restore-libs
+        uses: actions/cache/restore@v4
+        with:
+          path: local/x86_64-w64-mingw32
+          key: libs-x86_64-w64-mingw32-${{ hashFiles('getlibs.sh') }}
+          restore-keys: libs-x86_64-w64-mingw32-
+      - name: Get library dependencies
+        if: steps.restore-libs.outputs.cache-hit != 'true'
+        run: |
+          echo "steps.restore-libs.outputs.cache-primary-key: ${{ steps.restore-libs.outputs.cache-primary-key }}"
+          echo "steps.restore-libs.outputs.cache-matched-key: ${{ steps.restore-libs.outputs.cache-matched-key }}"
+          ./getlibs.sh x86_64-w64-mingw32
+      - name: Save Libs
+        if: steps.restore-libs.outputs.cache-hit != 'true'
+        id: save-libs
+        uses: actions/cache/save@v4
+        with:
+          path: local/x86_64-w64-mingw32
+          key: ${{ steps.restore-libs.outputs.cache-primary-key }}
+      - name: Configure UTAP
+        run: cmake -B "$BUILD_DIR" -DUTAP_CLANG_TIDY=OFF
+      - name: Build UTAP
+        run: cmake --build "$BUILD_DIR" --config $CMAKE_BUILD_TYPE
+      - name: Test UTAP
+        run: ctest --test-dir "$BUILD_DIR" -C $CMAKE_BUILD_TYPE
+      - name: Build UTAP
+        run: cmake --install "$BUILD_DIR" --config $CMAKE_BUILD_TYPE --prefix "$CMAKE_INSTALL_PREFIX"
+      - name: CCache Statistics
+        run: ccache --show-stats
+      - name: Configure Examples
+        run: cmake -B "examples/${BUILD_DIR}" -S examples
+      - name: Build Examples
+        run: cmake --build "examples/${BUILD_DIR}" --config "$CMAKE_BUILD_TYPE"
+      - name: Test Examples
+        run: ctest --test-dir "examples/${BUILD_DIR}"

@@ -1,0 +1,115 @@
+---
+name: Darwin AppleClang
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '**.h'
+      - '**.c'
+      - '**.hpp'
+      - '**.cpp'
+      - '**.y'
+      - '**.l'
+      - '**CMakeLists.txt'
+      - 'cmake/*.cmake'
+      - 'cmake/toolchain/*darwin*.cmake'
+      - 'examples/cmake/*.cmake'
+  pull_request:
+    paths:
+      - '**.h'
+      - '**.c'
+      - '**.hpp'
+      - '**.cpp'
+      - '**.y'
+      - '**.l'
+      - '**CMakeLists.txt'
+      - 'cmake/*.cmake'
+      - 'cmake/toolchain/*darwin*.cmake'
+      - 'examples/cmake/*.cmake'
+
+jobs:
+  build:
+    runs-on: macos-13
+    # see https://github.com/actions/runner-images/blob/main/images/macos/macos-13-Readme.md
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/CCACHE
+      BUILD_DIR: build-darwin
+      CTEST_OUTPUT_ON_FAILURE: 1
+      CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/cmake/toolchain/darwin.cmake
+      CMAKE_PREFIX_PATH: ${{ github.workspace }}/local/darwin
+      CMAKE_INSTALL_PREFIX: ${{ github.workspace }}/local/darwin
+      CMAKE_GENERATOR: Ninja
+      CMAKE_BUILD_TYPE: Debug
+      CFLAGS: "-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstrict-flex-arrays=2 -fno-omit-frame-pointer -fsanitize=undefined -fsanitize=address -fstack-protector-strong"
+      CXXFLAGS: "-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -D_GLIBCXX_ASSERTIONS -fstrict-flex-arrays=2 -fno-omit-frame-pointer -fsanitize=undefined -fsanitize=address -fstack-protector-strong"
+      LDFLAGS: "-fno-omit-frame-pointer -fsanitize=undefined -fsanitize=address -fstack-protector-strong"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '14.3.1'
+      - name: Get Home Brew dependencies
+        run: |
+          brew install -q cmake ninja ccache flex bison wget curl coreutils automake autoconf libtool gnu-sed gawk
+          NINJA_PATH=$(brew --prefix ninja)/bin
+          BISON_PATH=$(brew --prefix bison)/bin
+          FLEX_PATH=$(brew --prefix flex)/bin
+          export PATH="${NINJA_PATH}:${BISON_PATH}:${FLEX_PATH}:${PATH}"
+          command -v ninja          
+          command -v bison
+          command -v flex
+          echo "$PATH" >> $GITHUB_PATH
+
+      - name: Compute CCache keys
+        id: darwin-keys
+        run: |
+          key2=ccache-darwin-
+          key1="${key2}$(date +%W)"
+          echo "key1=${key1}" >> $GITHUB_OUTPUT
+          echo "key2=${key2}" >> $GITHUB_OUTPUT
+      - name: Restore CCache
+        id: ccache-restore
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.darwin-keys.outputs.key1 }}
+          restore-keys: ${{ steps.darwin-keys.outputs.key2 }}
+      - name: CCache Limits and Stats
+        run: |
+          ccache -M120M
+          ccache --show-stats
+
+      - name: Restore Libs
+        id: restore-libs
+        uses: actions/cache/restore@v4
+        with:
+          path: local/darwin
+          key: libs-darwin-${{ hashFiles('getlibs.sh') }}
+          restore-keys: libs-darwin
+      - name: Get library dependencies
+        if: steps.restore-libs.outputs.cache-hit != 'true'
+        run: ./getlibs.sh darwin
+      - name: Store Libs Cache
+        if: steps.restore-libs.outputs.cache-hit != 'true'
+        id: save-libs
+        uses: actions/cache/save@v4
+        with:
+          path: local/darwin
+          key: ${{ steps.restore-libs.outputs.cache-primary-key }}
+      - name: Configure UTAP
+        run: cmake -B "$BUILD_DIR" -DUTAP_CLANG_TIDY=OFF
+      - name: Build UTAP
+        run: cmake --build "$BUILD_DIR" --config $CMAKE_BUILD_TYPE
+      - name: Test UTAP
+        run: ctest --test-dir "$BUILD_DIR" -C $CMAKE_BUILD_TYPE
+      - name: Install UTAP
+        run: cmake --install "$BUILD_DIR" --config $CMAKE_BUILD_TYPE --prefix="$CMAKE_INSTALL_PREFIX"
+      - name: CCache Statistics
+        run: ccache --show-stats
+      - name: Configure Examples
+        run: cmake -B examples/build -S examples
+      - name: Build Examples
+        run: cmake --build examples/build
+      - name: Test Examples
+        run: ctest --test-dir examples/build

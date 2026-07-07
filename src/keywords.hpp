@@ -22,7 +22,7 @@
 #ifndef INCLUDE_UTAP_KEYWORDS_HPP
 #define INCLUDE_UTAP_KEYWORDS_HPP
 
-#include "libparser.h"
+#include "libparser.hpp"
 
 #include <string_view>
 #include <cinttypes>  // uint32_t
@@ -31,7 +31,7 @@ namespace UTAP {
 struct Keyword
 {
     int token{};
-    syntax_t syntax{};
+    Syntax syntax{};
 };
 
 /**
@@ -40,7 +40,7 @@ struct Keyword
  * @param syntax the syntax
  * @return true if the text is a keyword according to the specified syntax.
  */
-bool is_keyword(std::string_view word, syntax_t syntax);
+bool is_keyword(std::string_view word, Syntax syntax);
 
 /**
  * Searches for the text among the keywords and returns address if found.

@@ -20,9 +20,9 @@
    USA
 */
 
-#include "utap/featurechecker.h"
+#include "utap/FeatureChecker.hpp"
 
-#include "utap/utap.h"
+#include "utap/utap.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -37,7 +37,7 @@ int main(int argc, char** argv)
                   << "Usage: " << command << " [model-file-path]" << std::endl;
         return 1;
     }
-    for (auto i = 1u; i < argc; ++i) {
+    for (auto i = 1; i < argc; ++i) {
         auto path = std::filesystem::path{argv[i]};
         try {
             if (!exists(path))
@@ -48,7 +48,7 @@ int main(int argc, char** argv)
             auto content = std::string{std::istreambuf_iterator<char>{ifs}, std::istreambuf_iterator<char>{}};
 
             auto document = std::make_unique<UTAP::Document>();
-            parse_XML_buffer(content.c_str(), document.get(), true);
+            parse_XML_buffer(content.c_str(), *document, true);
             auto checker = UTAP::FeatureChecker{*document};
             const auto& type = checker.get_supported_methods();
 

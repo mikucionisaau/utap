@@ -1,6 +1,5 @@
 # libutap
 
-# Mini HOWTO
 Gerd Behrmann
 
 Marius Mikučionis
@@ -10,7 +9,8 @@ Marius Mikučionis
 3. Simple use
 4. Parsing trace files
 5. Architecture
-6. Issues
+6. API Documentation
+7. Issues
 
 ## 1. What is libutap
 
@@ -50,8 +50,7 @@ cmake --build build
 ```
 Run unit tests:
 ```sh
-cd build
-ctest
+ctest --test-dir build --output-on-failure
 ```
 
 Install UTAP to `$MYPATH`:
@@ -61,130 +60,35 @@ cmake --install build
 
 ## Compile from scratch (almost)
 
-Alternatively compile the bison and libraries for your target platform (see `cmake/toolchain/*.cmake` for list), e.g.:
+Get library dependencies:
 ```shell
-./getlibs/getlibs.bash linux64
+./getlibs.bash [platform]
 ```
 
 Compile and test UTAP:
 ```shell
-./compile.sh linux64
+./compile.sh [platform]
 ```
 
-For other platforms please see [compile.sh](compile.sh) script:
-```sh
-./compile.sh [linux64] [linux64-gcc10] [linux32] [win64] [win32] [darwin] [darwin-brew-gcc10]
-```
-Where
-- `win64` requires `x86_64-w64-mingw32-g++` from [MinGW-w64](https://www.mingw-w64.org/) (either from Linux distribution or [MSYS2](https://www.msys2.org/)).
+## 3. Example Use Case
 
-- `win32` requires `i686-w64-mingw32-g++` from [MinGW-w64](https://www.mingw-w64.org/) (either from Linux distribution or [MSYS2](https://www.msys2.org/)).
+Directory [examples](examples) contains a self-contained example with build scripts with two ways of building using either:
 
-- `linux32` requires `g++-multilib`.
-
-- `darwin` requires [XCode](https://developer.apple.com/xcode/) and its `Command Line Tools` installed.
-
-- `darwin-brew-gcc10` in addition to `XCode` requires [gcc-10](https://formulae.brew.sh/formula/gcc@10) with 
-
-- `getlibs` script requires `sha256sum` from [coreutils](https://formulae.brew.sh/formula/coreutils) (then add `/usr/local/opt/coreutils/libexec/gnubin` to `PATH`).
-
-## 3. Simple Use Case
-
-There are two ways one can use the library. In its simplest form, one
-calls one of the top level parsing functions defined in [utap/utap.h](src/utap/utap.h),
-e.g. `example.cpp`:
-
-```cpp
-#include "utap/utap.h"
-#include <iostream>
-
-int main()
-{
-    UTAP::Document doc;
-    int res = parse_XML_file("myfile.xml", &doc, true);
-    std::cout << "Result: " << res << std::endl;
-}
-```
-
-The first argument is the file to read. The second is the output of
-the parser and the third is a flag indicating whether we want to use
-the new or the old syntax (the old syntax is the one used in Uppaal
-3.4, the new is the one that will be used since Uppaal 3.6).
-
-After the call to `parse_XML_file`, one can access the network of timed
-automata in the system variable. Take a look at [utap/system.h](src/utap/system.h) to see
-what kind of structures you can access.
-Distribution also includes [pretty.cpp](src/pretty.cpp) for pretty-printing model files.
-See also doxygen API documentation in [doc/api/index.html](doc/api/index.html).
-
-Use the following command to compile the example:
-
-```sh
-g++ example.cpp -o example -lutap -lxml2
-```
-
-If UTAP was configured with `-DCMAKE_INSTALL_PREFIX=$MYPATH` to install in custom location
-then use the following to compile:
-
-```sh
-g++ -I$MYPATH/include example.cpp -o example -L$MYPATH/lib -lutap -lxml2
-```
-
-### Use Case with CMake
-Add the following `CMakeLists.txt` build script:
-```cmake
-cmake_minimum_required(VERSION 3.22)
-project(Example CXX)
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-
-find_package(UTAP 2.1.0 QUIET)
-
-if (utap_FOUND)
-  message(STATUS "Found UTAP preinstalled.")
-else(utap_FOUND)
-  message(STATUS "Failed to find UTAP, will fetch and compile from source.")
-  include(FetchContent)
-  FetchContent_Declare(
-    UTAP
-    GIT_REPOSITORY https://github.com/UPPAALModelChecker/utap.git
-    GIT_TAG v2.1.0      # fetches version 2.1.0, alternatively try 'main' branch
-    GIT_SHALLOW TRUE  # get only the last commit version
-    GIT_PROGRESS TRUE # show progress of download
-    FIND_PACKAGE_ARGS NAMES UTAP
-    USES_TERMINAL_DOWNLOAD TRUE # show progress in ninja generator
-    USES_TERMINAL_CONFIGURE ON
-    USES_TERMINAL_BUILD ON
-    USES_TERMINAL_INSTALL ON
-    LOG_DOWNLOAD ON
-    LOG_CONFIGURE ON
-    LOG_BUILD ON
-    LOG_INSTALL ON
-    LOG_OUTPUT_ON_FAILURE ON)
-  FetchContent_MakeAvailable(UTAP)
-endif(utap_FOUND)
-```
-
-Then the UTAP can be linked with `example` like this:
-```cmake
-add_executable(example example.cpp)
-target_link_libraries(example PRIVATE UTAP)
-```
-
-Configure:
+* [compile-with-getlibs.sh](examples/compile-with-getlibs.sh) compiles and installs all the dependencies into [local](examples/local) directory and then builds the [example.cpp](examples/example.cpp) with it.
+The script behavior can be customized by exporting the following environment variables:
+    - `CMAKE_BUILD_TYPE` - specify the build type: `Debug`, `Release` (default), `RelWithDebInfo`, `MinSizeRel`.
+    - `CMAKE_PREFIX_PATH` - specify where to look for libraries (default: `examples/local/$TARGET`).
+    - `CMAKE_INSTALL_PREFIX` - specify where to instal the libraries (default: `examples/local/arch-kernel`).
+    - `TARGET` - specify target architecture and kernel (default: native host), see [toolchain](cmake/toolchain) for a list of supported targets.
+    - `UTAP_SRC` - specify the path to UTAP source directory (default this UTAP repository).
 ```shell
-cmake -B build .
+rm -Rf examples/build-*
+examples/compile-with-getlibs.sh
 ```
-Compile:
+ * [compile-with-cmake.sh](examples/compile-with-cmake.sh) uses CMake to get the dependencies and then builds [example.cpp](examples/example.cpp) with them. The benefit is that all dependencies can be build using the same options (debug/release/sanitizers etc).
 ```shell
-cmake --build build
-```
-Run:
-```shell
-./build/example
+rm -Rf examples/build-*
+examples/compile-with-cmake.sh
 ```
 
 ## 4. Parsing Uppaal Trace Files
@@ -254,16 +158,33 @@ ParserBuilder class).
 
 A TAS object represents the templates, variables, locations,
 transitions and processes of a model. Symbols are represented by
-`symbol_t` objects (see the API documentation). A symbol is a name (a
-string) with a type. The type is represented by a `type_t`
-object. Symbols are grouped into frames (represented by `frame_t`
+`Symbol` objects (see the API documentation). A symbol is a name (a
+string) with a type. The type is represented by a `Type`
+object. Symbols are grouped into frames (represented by `Frame`
 objects). Frames are used to represent scopes and other collections of
 symbols such as records or parameters of templates and functions.
 
 All expressions are represented using a tree structure where the
 leaves represent values or variables and the inner nodes represent
-operations. Each node is referenced using an `expression_t` object.
+operations. Each node is referenced using an `Expression` object.
 
-## 6. Issues
+## 6. API Documentation
+
+[doxygen](https://www.doxygen.nl/) can be used to generate HTML documentation in `doc/api/html`:
+
+1. Install doxygen:
+```shell
+sudo apt install doxygen
+```
+2. Generate and open the documentation:
+```shell
+cd doc/api
+doxygen libutap.doxygen
+xdg-open file://$PWD/html/index.html
+```
+
+For more options (LaTeX/pdf etc) use doxywizard (`sudo apt install doxygen-gui`).
+
+## 7. Issues
 
 Please use the [Issues](https://github.com/UPPAALModelChecker/utap/issues) tab at the top to report problems.

@@ -1,0 +1,110 @@
+---
+name: Ubuntu Clang20
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '**.h'
+      - '**.c'
+      - '**.hpp'
+      - '**.cpp'
+      - '**.y'
+      - '**.l'
+      - '**CMakeLists.txt'
+      - 'cmake/*.cmake'
+      - 'cmake/toolchain/*linux*.cmake'
+      - 'examples/cmake/*.cmake'
+  pull_request:
+    paths:
+      - '**.h'
+      - '**.c'
+      - '**.hpp'
+      - '**.cpp'
+      - '**.y'
+      - '**.l'
+      - '**CMakeLists.txt'
+      - 'cmake/*.cmake'
+      - 'cmake/toolchain/*linux*.cmake'
+      - 'examples/cmake/*.cmake'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/CCACHE
+      BUILD_DIR: build-x86_64-linux64-clang20
+      CTEST_OUTPUT_ON_FAILURE: 1
+      CMAKE_TOOLCHAIN_FILE: ${{ github.workspace }}/cmake/toolchain/x86_64-linux-clang20.cmake
+      CMAKE_PREFIX_PATH: ${{ github.workspace }}/local/x86_64-linux-clang20
+      CMAKE_INSTALL_PREFIX: ${{ github.workspace }}/local/x86_64-linux-clang20
+      CMAKE_GENERATOR: Ninja
+      CMAKE_BUILD_TYPE: Debug
+      CFLAGS: "-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fstrict-flex-arrays=2 -fno-omit-frame-pointer -fsanitize=undefined -fsanitize=address -fsanitize=leak -fstack-protector-strong"
+      CXXFLAGS: "-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -D_GLIBCXX_ASSERTIONS -fstrict-flex-arrays=2 -fno-omit-frame-pointer -fsanitize=undefined -fsanitize=address -fsanitize=leak -fstack-protector-strong"
+      LDFLAGS: "-fno-omit-frame-pointer -fsanitize=undefined -fsanitize=address -fsanitize=leak -fstack-protector-strong"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get Ubuntu dependencies
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install clang-format curl wget unzip xz-utils bison flex cmake ninja-build ccache clang-20
+
+      - name: Check Formatting
+        run: |
+          clang-format --version
+          find src include test -iregex '.*\.\(c\|h\|cpp\|hpp\|cc\|hh\|cxx\|hxx\)$' -exec clang-format -n -Werror {} \;
+
+      - name: Compute CCache keys
+        id: x86_64-linux-clang20-keys
+        run: |
+          key2=ccache-x86_64-linux-clang20-
+          key1="${key2}$(date +%W)"
+          echo "key1=${key1}" >> $GITHUB_OUTPUT
+          echo "key2=${key2}" >> $GITHUB_OUTPUT
+
+      - name: Restore CCache
+        id: ccache-restore
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.x86_64-linux-clang20-keys.outputs.key1 }}
+          restore-keys: ${{ steps.x86_64-linux-clang20-keys.outputs.key2 }}
+      - name: CCache limits and stats
+        run: |
+          ccache -M120M
+          ccache --show-stats
+
+      - name: Restore Libs
+        id: restore-libs
+        uses: actions/cache/restore@v4
+        with:
+          path: local/x86_64-linux-clang20
+          key: libs-x86_64-linux-clang20-${{ hashFiles('getlibs.sh') }}
+          restore-keys: libs-x86_64-linux-clang20-
+      - name: Get library dependencies
+        if: steps.restore-libs.outputs.cache-hit != 'true'
+        run: ./getlibs.sh x86_64-linux-clang20
+      - name: Save Libs
+        if: steps.restore-libs.outputs.cache-hit != 'true'
+        id: save-libs
+        uses: actions/cache/save@v4
+        with:
+          path: local/x86_64-linux-clang20
+          key: ${{ steps.restore-libs.outputs.cache-primary-key }}
+      - name: Configure UTAP
+        run: cmake -B "$BUILD_DIR" -DUTAP_CLANG_TIDY=OFF
+      - name: Build UTAP
+        run: cmake --build "$BUILD_DIR" --config $CMAKE_BUILD_TYPE
+      - name: Test UTAP
+        run: ctest --test-dir "$BUILD_DIR" -C $CMAKE_BUILD_TYPE
+      - name: Install UTAP
+        run: cmake --install "$BUILD_DIR" --config $CMAKE_BUILD_TYPE --prefix "$CMAKE_INSTALL_PREFIX"
+      - name: CCache Statistics
+        run: ccache --show-stats
+      - name: Configure Examples
+        run: cmake -B examples/build -S examples
+      - name: Build Examples
+        run: cmake --build examples/build
+      - name: Test Examples
+        run: ctest --test-dir examples/build
